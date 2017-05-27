@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,54 +25,65 @@
 #include <stdexcept>
 #include <iterator>
 #include <cctype>
+#include <string.h>
 #include <glog/logging.h>
 
 namespace folly {
 
 namespace {
 
-inline void stringPrintfImpl(std::string& output, const char* format,
-                             va_list args) {
-  // Tru to the space at the end of output for our output buffer.
-  // Find out write point then inflate its size temporarily to its
-  // capacity; we will later shrink it to the size needed to represent
-  // the formatted string.  If this buffer isn't large enough, we do a
-  // resize and try again.
-
-  const auto write_point = output.size();
-  auto remaining = output.capacity() - write_point;
-  output.resize(output.capacity());
-
+int stringAppendfImplHelper(char* buf,
+                            size_t bufsize,
+                            const char* format,
+                            va_list args) {
   va_list args_copy;
   va_copy(args_copy, args);
-  int bytes_used = vsnprintf(&output[write_point], remaining, format,
-                             args_copy);
+  int bytes_used = vsnprintf(buf, bufsize, format, args_copy);
   va_end(args_copy);
-  if (bytes_used < 0) {
-    throw std::runtime_error(
-      to<std::string>("Invalid format string; snprintf returned negative "
-                      "with format string: ", format));
-  } else if (size_t(bytes_used) < remaining) {
-    // There was enough room, just shrink and return.
-    output.resize(write_point + bytes_used);
-  } else {
-    output.resize(write_point + bytes_used + 1);
-    remaining = bytes_used + 1;
-    va_list args_copy;
-    va_copy(args_copy, args);
-    bytes_used = vsnprintf(&output[write_point], remaining, format,
-                           args_copy);
-    va_end(args_copy);
-    if (size_t(bytes_used) + 1 != remaining) {
-      throw std::runtime_error(
-        to<std::string>("vsnprint retry did not manage to work "
-                        "with format string: ", format));
-    }
-    output.resize(write_point + bytes_used);
-  }
+  return bytes_used;
 }
 
-}  // anon namespace
+void stringAppendfImpl(std::string& output, const char* format, va_list args) {
+  // Very simple; first, try to avoid an allocation by using an inline
+  // buffer.  If that fails to hold the output string, allocate one on
+  // the heap, use it instead.
+  //
+  // It is hard to guess the proper size of this buffer; some
+  // heuristics could be based on the number of format characters, or
+  // static analysis of a codebase.  Or, we can just pick a number
+  // that seems big enough for simple cases (say, one line of text on
+  // a terminal) without being large enough to be concerning as a
+  // stack variable.
+  std::array<char, 128> inline_buffer;
+
+  int bytes_used = stringAppendfImplHelper(
+      inline_buffer.data(), inline_buffer.size(), format, args);
+  if (bytes_used < 0) {
+    throw std::runtime_error(to<std::string>(
+        "Invalid format string; snprintf returned negative "
+        "with format string: ",
+        format));
+  }
+
+  if (static_cast<size_t>(bytes_used) < inline_buffer.size()) {
+    output.append(inline_buffer.data(), size_t(bytes_used));
+    return;
+  }
+
+  // Couldn't fit.  Heap allocate a buffer, oh well.
+  std::unique_ptr<char[]> heap_buffer(new char[size_t(bytes_used + 1)]);
+  int final_bytes_used = stringAppendfImplHelper(
+      heap_buffer.get(), size_t(bytes_used + 1), format, args);
+  // The second call can take fewer bytes if, for example, we were printing a
+  // string buffer with null-terminating char using a width specifier -
+  // vsnprintf("%.*s", buf.size(), buf)
+  CHECK(bytes_used >= final_bytes_used);
+
+  // We don't keep the trailing '\0' in our output string
+  output.append(heap_buffer.get(), size_t(final_bytes_used));
+}
+
+} // anon namespace
 
 std::string stringPrintf(const char* format, ...) {
   va_list ap;
@@ -84,19 +95,8 @@ std::string stringPrintf(const char* format, ...) {
 }
 
 std::string stringVPrintf(const char* format, va_list ap) {
-  // snprintf will tell us how large the output buffer should be, but
-  // we then have to call it a second time, which is costly.  By
-  // guestimating the final size, we avoid the double snprintf in many
-  // cases, resulting in a performance win.  We use this constructor
-  // of std::string to avoid a double allocation, though it does pad
-  // the resulting string with nul bytes.  Our guestimation is twice
-  // the format string size, or 32 bytes, whichever is larger.  This
-  // is a hueristic that doesn't affect correctness but attempts to be
-  // reasonably fast for the most common cases.
-  std::string ret(std::max(size_t(32), strlen(format) * 2), '\0');
-  ret.resize(0);
-
-  stringPrintfImpl(ret, format, ap);
+  std::string ret;
+  stringAppendfImpl(ret, format, ap);
   return ret;
 }
 
@@ -114,7 +114,7 @@ std::string& stringAppendf(std::string* output, const char* format, ...) {
 std::string& stringVAppendf(std::string* output,
                             const char* format,
                             va_list ap) {
-  stringPrintfImpl(*output, format, ap);
+  stringAppendfImpl(*output, format, ap);
   return *output;
 }
 
@@ -129,7 +129,7 @@ void stringPrintf(std::string* output, const char* format, ...) {
 
 void stringVPrintf(std::string* output, const char* format, va_list ap) {
   output->clear();
-  stringPrintfImpl(*output, format, ap);
+  stringAppendfImpl(*output, format, ap);
 };
 
 namespace {
@@ -285,7 +285,7 @@ double prettyToDouble(folly::StringPiece *const prettyString,
         bestPrefixId = j;
       }
     } else if (prettyString->startsWith(suffixes[j].suffix)) {
-      int suffixLen = strlen(suffixes[j].suffix);
+      int suffixLen = int(strlen(suffixes[j].suffix));
       //We are looking for a longest suffix matching prefix of the string
       //after numeric value. We need this in case suffixes have common prefix.
       if (suffixLen > longestPrefixLen) {
@@ -299,15 +299,14 @@ double prettyToDouble(folly::StringPiece *const prettyString,
             "Unable to parse suffix \"",
             prettyString->toString(), "\""));
   }
-  prettyString->advance(longestPrefixLen);
+  prettyString->advance(size_t(longestPrefixLen));
   return suffixes[bestPrefixId].val ? value * suffixes[bestPrefixId].val :
                                       value;
 }
 
 double prettyToDouble(folly::StringPiece prettyString, const PrettyType type){
   double result = prettyToDouble(&prettyString, type);
-  detail::enforceWhitespace(prettyString.data(),
-                            prettyString.data() + prettyString.size());
+  detail::enforceWhitespace(prettyString);
   return result;
 }
 
@@ -330,9 +329,20 @@ fbstring errnoStr(int err) {
 
   // https://developer.apple.com/library/mac/documentation/Darwin/Reference/ManPages/man3/strerror_r.3.html
   // http://www.kernel.org/doc/man-pages/online/pages/man3/strerror.3.html
-#if defined(__APPLE__) || defined(__FreeBSD__) ||\
-    defined(__CYGWIN__) || defined(__ANDROID__) ||\
-    ((_POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600) && !_GNU_SOURCE)
+#if defined(_WIN32) && (defined(__MINGW32__) || defined(_MSC_VER))
+  // mingw64 has no strerror_r, but Windows has strerror_s, which C11 added
+  // as well. So maybe we should use this across all platforms (together
+  // with strerrorlen_s). Note strerror_r and _s have swapped args.
+  int r = strerror_s(buf, sizeof(buf), err);
+  if (r != 0) {
+    result = to<fbstring>(
+      "Unknown error ", err,
+      " (strerror_r failed with error ", errno, ")");
+  } else {
+    result.assign(buf);
+  }
+#elif defined(FOLLY_HAVE_XSI_STRERROR_R) || \
+  defined(__APPLE__) || defined(__ANDROID__)
   // Using XSI-compatible strerror_r
   int r = strerror_r(err, buf, sizeof(buf));
 
@@ -352,25 +362,6 @@ fbstring errnoStr(int err) {
   return result;
 }
 
-StringPiece skipWhitespace(StringPiece sp) {
-  // Spaces other than ' ' characters are less common but should be
-  // checked.  This configuration where we loop on the ' '
-  // separately from oddspaces was empirically fastest.
-  auto oddspace = [] (char c) {
-    return c == '\n' || c == '\t' || c == '\r';
-  };
-
-loop:
-  for (; !sp.empty() && sp.front() == ' '; sp.pop_front()) {
-  }
-  if (!sp.empty() && oddspace(sp.front())) {
-    sp.pop_front();
-    goto loop;
-  }
-
-  return sp;
-}
-
 namespace {
 
 void toLowerAscii8(char& c) {
@@ -382,7 +373,7 @@ void toLowerAscii8(char& c) {
   // by adding 0x20.
 
   // Step 1: Clear the high order bit. We'll deal with it in Step 5.
-  unsigned char rotated = c & 0x7f;
+  uint8_t rotated = uint8_t(c & 0x7f);
   // Currently, the value of rotated, as a function of the original c is:
   //   below 'A':   0- 64
   //   'A'-'Z':    65- 90
@@ -428,7 +419,7 @@ void toLowerAscii8(char& c) {
   // At this point, rotated is 0x20 if c is 'A'-'Z' and 0x00 otherwise
 
   // Step 7: Add rotated to c
-  c += rotated;
+  c += char(rotated);
 }
 
 void toLowerAscii32(uint32_t& c) {
@@ -549,12 +540,56 @@ size_t hexDumpLine(const void* ptr, size_t offset, size_t size,
   }
   line.append(16 - n, ' ');
   line.push_back('|');
-  DCHECK_EQ(line.size(), 78);
+  DCHECK_EQ(line.size(), 78u);
 
   return n;
 }
 
 } // namespace detail
+
+std::string stripLeftMargin(std::string s) {
+  std::vector<StringPiece> pieces;
+  split("\n", s, pieces);
+  auto piecer = range(pieces);
+
+  auto piece = (piecer.end() - 1);
+  auto needle = std::find_if(piece->begin(),
+                             piece->end(),
+                             [](char c) { return c != ' ' && c != '\t'; });
+  if (needle == piece->end()) {
+    (piecer.end() - 1)->clear();
+  }
+  piece = piecer.begin();
+  needle = std::find_if(piece->begin(),
+                        piece->end(),
+                        [](char c) { return c != ' ' && c != '\t'; });
+  if (needle == piece->end()) {
+    piecer.erase(piecer.begin(), piecer.begin() + 1);
+  }
+
+  const auto sentinel = std::numeric_limits<size_t>::max();
+  auto indent = sentinel;
+  size_t max_length = 0;
+  for (piece = piecer.begin(); piece != piecer.end(); piece++) {
+    needle = std::find_if(piece->begin(),
+                          piece->end(),
+                          [](char c) { return c != ' ' && c != '\t'; });
+    if (needle != piece->end()) {
+      indent = std::min<size_t>(indent, size_t(needle - piece->begin()));
+    } else {
+      max_length = std::max<size_t>(piece->size(), max_length);
+    }
+  }
+  indent = indent == sentinel ? max_length : indent;
+  for (piece = piecer.begin(); piece != piecer.end(); piece++) {
+    if (piece->size() < indent) {
+      piece->clear();
+    } else {
+      piece->erase(piece->begin(), piece->begin() + indent);
+    }
+  }
+  return join("\n", piecer);
+}
 
 }   // namespace folly
 

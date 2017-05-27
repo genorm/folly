@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_EVICTINGHASHMAP_H_
-#define FOLLY_EVICTINGHASHMAP_H_
+#pragma once
 
 #include <algorithm>
 #include <exception>
@@ -25,6 +24,7 @@
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/unordered_set.hpp>
 #include <boost/iterator/iterator_adaptor.hpp>
+#include <folly/portability/BitsFunctexcept.h>
 
 namespace folly {
 
@@ -90,9 +90,8 @@ namespace folly {
  * unless evictions of LRU items are triggered by calling prune() by clients
  * (using their own eviction criteria).
  */
-template <class TKey, class TValue, class THash = std::hash<TKey> >
-class EvictingCacheMap : private boost::noncopyable {
-
+template <class TKey, class TValue, class THash = std::hash<TKey>>
+class EvictingCacheMap {
  private:
   // typedefs for brevity
   struct Node;
@@ -148,6 +147,10 @@ class EvictingCacheMap : private boost::noncopyable {
         maxSize_(maxSize),
         clearSize_(clearSize) { }
 
+  EvictingCacheMap(const EvictingCacheMap&) = delete;
+  EvictingCacheMap& operator=(const EvictingCacheMap&) = delete;
+  EvictingCacheMap(EvictingCacheMap&&) = default;
+  EvictingCacheMap& operator=(EvictingCacheMap&&) = default;
 
   ~EvictingCacheMap() {
     setPruneHook(nullptr);
@@ -166,11 +169,14 @@ class EvictingCacheMap : private boost::noncopyable {
    * If you intend to resize dynamically using this, then picking an index size
    * that works well and initializing with corresponding maxSize is the only
    * reasonable option.
+   *
+   * @param maxSize new maximum size of the cache map.
+   * @param pruneHook callback to use on eviction.
    */
-  void setMaxSize(size_t maxSize) {
+  void setMaxSize(size_t maxSize, PruneHookCall pruneHook = nullptr) {
     if (maxSize != 0 && maxSize < size()) {
       // Prune the excess elements with our new constraints.
-      prune(std::max(size() - maxSize, clearSize_));
+      prune(std::max(size() - maxSize, clearSize_), pruneHook);
     }
     maxSize_ = maxSize;
   }
@@ -203,7 +209,7 @@ class EvictingCacheMap : private boost::noncopyable {
   TValue& get(const TKey& key) {
     auto it = find(key);
     if (it == end()) {
-      throw std::out_of_range("Key does not exist");
+      std::__throw_out_of_range("Key does not exist");
     }
     return it->second;
   }
@@ -235,7 +241,7 @@ class EvictingCacheMap : private boost::noncopyable {
   const TValue& getWithoutPromotion(const TKey& key) const {
     auto it = findWithoutPromotion(key);
     if (it == end()) {
-      throw std::out_of_range("Key does not exist");
+      std::__throw_out_of_range("Key does not exist");
     }
     return it->second;
   }
@@ -286,8 +292,12 @@ class EvictingCacheMap : private boost::noncopyable {
    * @param promote boolean flag indicating whether or not to move something
    *     to the front of an LRU.  This only really matters if you're setting
    *     a value that already exists.
+   * @param pruneHook callback to use on eviction (if it occurs).
    */
-  void set(const TKey& key, TValue value, bool promote = true) {
+  void set(const TKey& key,
+           TValue value,
+           bool promote = true,
+           PruneHookCall pruneHook = nullptr) {
     auto it = findInIndex(key);
     if (it != index_.end()) {
       it->pr.second = std::move(value);
@@ -302,7 +312,7 @@ class EvictingCacheMap : private boost::noncopyable {
 
       // no evictions if maxSize_ is 0 i.e. unlimited capacity
       if (maxSize_ > 0 && size() > maxSize_) {
-        prune(clearSize_);
+        prune(clearSize_, pruneHook);
       }
     }
   }
@@ -323,8 +333,8 @@ class EvictingCacheMap : private boost::noncopyable {
     return index_.empty();
   }
 
-  void clear() {
-    prune(size());
+  void clear(PruneHookCall pruneHook = nullptr) {
+    prune(size(), pruneHook);
   }
 
   /**
@@ -485,5 +495,3 @@ class EvictingCacheMap : private boost::noncopyable {
 };
 
 } // folly
-
-#endif /* FOLLY_EVICTINGHASHMAP_H_ */

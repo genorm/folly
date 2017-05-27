@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -117,8 +117,7 @@ Sample usage:
      }
 */
 
-#ifndef FOLLY_CONCURRENT_SKIP_LIST_H_
-#define FOLLY_CONCURRENT_SKIP_LIST_H_
+#pragma once
 
 #include <algorithm>
 #include <atomic>
@@ -131,7 +130,7 @@ Sample usage:
 #include <folly/ConcurrentSkipList-inl.h>
 #include <folly/Likely.h>
 #include <folly/Memory.h>
-#include <folly/SmallLocks.h>
+#include <folly/MicroSpinLock.h>
 
 namespace folly {
 
@@ -161,20 +160,33 @@ class ConcurrentSkipList {
   class Accessor;
   class Skipper;
 
-  explicit ConcurrentSkipList(int height, const NodeAlloc& alloc = NodeAlloc())
-    : recycler_(alloc),
-      head_(NodeType::create(recycler_.alloc(), height, value_type(), true)),
-      size_(0) { }
+  explicit ConcurrentSkipList(int height, const NodeAlloc& alloc)
+      : recycler_(alloc),
+        head_(NodeType::create(recycler_.alloc(), height, value_type(), true)),
+        size_(0) {}
+
+  explicit ConcurrentSkipList(int height)
+      : recycler_(),
+        head_(NodeType::create(recycler_.alloc(), height, value_type(), true)),
+        size_(0) {}
 
   // Convenient function to get an Accessor to a new instance.
-  static Accessor create(int height = 1, const NodeAlloc& alloc = NodeAlloc()) {
+  static Accessor create(int height, const NodeAlloc& alloc) {
     return Accessor(createInstance(height, alloc));
   }
 
+  static Accessor create(int height = 1) {
+    return Accessor(createInstance(height));
+  }
+
   // Create a shared_ptr skiplist object with initial head height.
-  static std::shared_ptr<SkipListType> createInstance(
-      int height = 1, const NodeAlloc& alloc = NodeAlloc()) {
+  static std::shared_ptr<SkipListType> createInstance(int height,
+                                                      const NodeAlloc& alloc) {
     return std::make_shared<ConcurrentSkipList>(height, alloc);
+  }
+
+  static std::shared_ptr<SkipListType> createInstance(int height = 1) {
+    return std::make_shared<ConcurrentSkipList>(height);
   }
 
   //===================================================================
@@ -183,7 +195,7 @@ class ConcurrentSkipList {
   //===================================================================
 
   ~ConcurrentSkipList() {
-    /* static */ if (NodeType::template destroyIsNoOp<NodeAlloc>()) {
+    /* static */ if (NodeType::template DestroyIsNoOp<NodeAlloc>::value) {
       // Avoid traversing the list if using arena allocator.
       return;
     }
@@ -316,9 +328,9 @@ class ConcurrentSkipList {
       // locks acquired and all valid, need to modify the links under the locks.
       newNode =
         NodeType::create(recycler_.alloc(), nodeHeight, std::forward<U>(data));
-      for (int layer = 0; layer < nodeHeight; ++layer) {
-        newNode->setSkip(layer, succs[layer]);
-        preds[layer]->setSkip(layer, newNode);
+      for (int k = 0; k < nodeHeight; ++k) {
+        newNode->setSkip(k, succs[k]);
+        preds[k]->setSkip(k, newNode);
       }
 
       newNode->setFullyLinked();
@@ -366,8 +378,8 @@ class ConcurrentSkipList {
         continue;  // this will unlock all the locks
       }
 
-      for (int layer = nodeHeight - 1; layer >= 0; --layer) {
-        preds[layer]->setSkip(layer, nodeToDelete->skip(layer));
+      for (int k = nodeHeight - 1; k >= 0; --k) {
+        preds[k]->setSkip(k, nodeToDelete->skip(k));
       }
 
       incrementSize(-1);
@@ -430,10 +442,11 @@ class ConcurrentSkipList {
     bool found = false;
     while (!found) {
       // stepping down
-      for (; ht > 0 && less(data, pred->skip(ht - 1)); --ht) {}
-      if (ht == 0) return std::make_pair(pred->skip(0), 0);  // not found
+      for (; ht > 0 && less(data, node = pred->skip(ht - 1)); --ht) {}
+      if (ht == 0) return std::make_pair(node, 0);  // not found
+      // node <= data now, but we need to fix up ht
+      --ht;
 
-      node = pred->skip(--ht);  // node <= data now
       // stepping right
       while (greater(data, node)) {
         pred = node;
@@ -666,7 +679,7 @@ class detail::csl_iterator :
   friend class boost::iterator_core_access;
   template<class,class> friend class csl_iterator;
 
-  void increment() { node_ = node_->next(); };
+  void increment() { node_ = node_->next(); }
   bool equal(const csl_iterator& other) const { return node_ == other.node_; }
   value_type& dereference() const { return node_->data(); }
 
@@ -705,7 +718,7 @@ class ConcurrentSkipList<T, Comp, NodeAlloc, MAX_HEIGHT>::Skipper {
     }
     int max_layer = maxLayer();
     for (int i = 0; i < max_layer; ++i) {
-      hints_[i] = i + 1;
+      hints_[i] = uint8_t(i + 1);
     }
     hints_[max_layer] = max_layer;
   }
@@ -786,5 +799,3 @@ class ConcurrentSkipList<T, Comp, NodeAlloc, MAX_HEIGHT>::Skipper {
 };
 
 } // namespace folly
-
-#endif  // FOLLY_CONCURRENT_SKIP_LIST_H_

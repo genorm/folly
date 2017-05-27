@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,9 @@
 
 #include <cstdlib>
 
-#include <gtest/gtest.h>
-
 #include <folly/Range.h>
 #include <folly/String.h>
+#include <folly/portability/GTest.h>
 
 namespace folly { namespace symbolizer { namespace test {
 
@@ -34,13 +33,23 @@ TEST(Symbolizer, Single) {
   ASSERT_TRUE(symbolizer.symbolize(reinterpret_cast<uintptr_t>(foo), a));
   EXPECT_EQ("folly::symbolizer::test::foo()", a.demangledName());
 
-  auto path = a.location.file.toString();
-  folly::StringPiece basename(path);
-  auto pos = basename.rfind('/');
-  if (pos != folly::StringPiece::npos) {
-    basename.advance(pos + 1);
+  // The version of clang we use doesn't generate a `.debug_aranges` section,
+  // which the symbolizer needs to lookup the filename.
+  constexpr bool built_with_clang =
+    #ifdef __clang__
+      true;
+    #else
+      false;
+    #endif
+  if (!built_with_clang) {
+    auto path = a.location.file.toString();
+    folly::StringPiece basename(path);
+    auto pos = basename.rfind('/');
+    if (pos != folly::StringPiece::npos) {
+      basename.advance(pos + 1);
+    }
+    EXPECT_EQ("SymbolizerTest.cpp", basename.str());
   }
-  EXPECT_EQ("SymbolizerTest.cpp", basename.str());
 }
 
 FrameArray<100> goldenFrames;
@@ -64,7 +73,7 @@ void bar() {
 
 class ElfCacheTest : public testing::Test {
  protected:
-  void SetUp();
+  void SetUp() override;
 };
 
 // Capture "golden" stack trace with default-configured Symbolizer
@@ -106,3 +115,10 @@ TEST_F(ElfCacheTest, SignalSafeElfCache) {
 }
 
 }}}  // namespaces
+
+// Can't use initFacebookLight since that would install its own signal handlers
+// Can't use initFacebookNoSignals since we cannot depend on common
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}

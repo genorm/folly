@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,10 +56,10 @@ static auto primes =
     seq(1, 1 << 20) | filter(isPrimeSlow) | as<vector>();
 
 static auto isPrime = [](int n) {
-  return !(from(primes)
+  return from(primes)
          | until([&](int d) { return d * d > n; })
          | filter([&](int d) { return 0 == n % d; })
-         | any);
+         | isEmpty;
 };
 
 static auto factors = [](int n) {

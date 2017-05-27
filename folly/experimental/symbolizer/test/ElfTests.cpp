@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
-
 #include <folly/experimental/symbolizer/Elf.h>
+#include <folly/portability/GTest.h>
 
 using folly::symbolizer::ElfFile;
 
@@ -32,8 +31,7 @@ class ElfTest : public ::testing::Test {
 
   ElfTest() : elfFile_(binaryPath.c_str()) {
   }
-  virtual ~ElfTest() {
-  }
+  ~ElfTest() override {}
 
  protected:
   ElfFile elfFile_;

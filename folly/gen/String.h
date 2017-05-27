@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_GEN_STRING_H
-#define FOLLY_GEN_STRING_H
+#pragma once
+#define FOLLY_GEN_STRING_H_
 
 #include <folly/Range.h>
 #include <folly/gen/Base.h>
@@ -54,9 +54,9 @@ class SplitTo;
  */
 // make this a template so we don't require StringResplitter to be complete
 // until use
-template <class S=detail::StringResplitter>
-S resplit(char delimiter) {
-  return S(delimiter);
+template <class S = detail::StringResplitter>
+S resplit(char delimiter, bool keepDelimiter = false) {
+  return S(delimiter, keepDelimiter);
 }
 
 template <class S = detail::SplitStringSource<char>>
@@ -246,5 +246,3 @@ StreamSplitter<Callback> streamSplitter(char delimiter,
 }  // namespace folly
 
 #include <folly/gen/String-inl.h>
-
-#endif // FOLLY_GEN_STRING_H

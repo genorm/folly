@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,8 @@
 #include <folly/experimental/symbolizer/Symbolizer.h>
 
 #include <glog/logging.h>
-#include <gtest/gtest.h>
+
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 using namespace folly::symbolizer;
@@ -52,9 +53,9 @@ void verifyStackTraces() {
   // Other than the top 2 frames (this one and getStackTrace /
   // getStackTraceSafe), the stack traces should be identical
   for (size_t i = 2; i < fa.frameCount; ++i) {
-    VLOG(1) << "i=" << i << " " << std::hex << fa.addresses[i] << " "
-            << faSafe.addresses[i];
-    CHECK_EQ(fa.addresses[i], faSafe.addresses[i]);
+    LOG(INFO) << "i=" << i << " " << std::hex << "0x" << fa.addresses[i]
+              << " 0x" << faSafe.addresses[i];
+    EXPECT_EQ(fa.addresses[i], faSafe.addresses[i]);
   }
 }
 
@@ -67,7 +68,7 @@ void foo2() {
 }
 
 volatile bool handled = false;
-void handler(int num, siginfo_t* info, void* ctx) {
+void handler(int /* num */, siginfo_t* /* info */, void* /* ctx */) {
   // Yes, getStackTrace and VLOG aren't async-signal-safe, but signals
   // raised with raise() aren't "async" signals.
   foo1();
@@ -85,11 +86,12 @@ TEST(StackTraceTest, Signal) {
   sa.sa_flags = SA_RESETHAND | SA_SIGINFO;
   CHECK_ERR(sigaction(SIGUSR1, &sa, nullptr));
   raise(SIGUSR1);
-  CHECK(handled);
+  EXPECT_TRUE(handled);
 }
 
 int main(int argc, char *argv[]) {
   testing::InitGoogleTest(&argc, argv);
   gflags::ParseCommandLineFlags(&argc, &argv, true);
+  google::InitGoogleLogging(argv[0]);
   return RUN_ALL_TESTS();
 }

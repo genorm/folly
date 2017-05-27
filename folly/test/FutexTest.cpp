@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,15 +19,17 @@
 
 #include <chrono>
 #include <functional>
+#include <ratio>
 #include <thread>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
-#include <gtest/gtest.h>
-#include <time.h>
+
+#include <folly/portability/Time.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly::detail;
 using namespace folly::test;
+using namespace std;
 using namespace std::chrono;
 
 typedef DeterministicSchedule DSched;
@@ -54,7 +56,7 @@ void run_basic_tests() {
   DSched::join(thr);
 }
 
-template <template<typename> class Atom, typename Clock>
+template <template<typename> class Atom, typename Clock, typename Duration>
 void liveClockWaitUntilTests() {
   Futex<Atom> f(0);
 
@@ -62,8 +64,9 @@ void liveClockWaitUntilTests() {
     auto fp = &f; // workaround for t5336595
     auto thrA = DSched::thread([fp,stress]{
       while (true) {
-        auto deadline = Clock::now() + microseconds(1 << (stress % 20));
-        auto res = fp->futexWaitUntil(0, deadline);
+        const auto deadline = time_point_cast<Duration>(
+            Clock::now() + microseconds(1 << (stress % 20)));
+        const auto res = fp->futexWaitUntil(0, deadline);
         EXPECT_TRUE(res == FutexResult::TIMEDOUT || res == FutexResult::AWOKEN);
         if (res == FutexResult::AWOKEN) {
           break;
@@ -78,12 +81,26 @@ void liveClockWaitUntilTests() {
     DSched::join(thrA);
   }
 
-  auto start = Clock::now();
-  EXPECT_EQ(f.futexWaitUntil(0, start + milliseconds(100)),
-            FutexResult::TIMEDOUT);
-  LOG(INFO) << "Futex wait timed out after waiting for "
-            << duration_cast<milliseconds>(Clock::now() - start).count()
-            << "ms, should be ~100ms";
+  {
+    const auto start = Clock::now();
+    const auto deadline = time_point_cast<Duration>(start + milliseconds(100));
+    EXPECT_EQ(f.futexWaitUntil(0, deadline), FutexResult::TIMEDOUT);
+    LOG(INFO) << "Futex wait timed out after waiting for "
+              << duration_cast<milliseconds>(Clock::now() - start).count()
+              << "ms using clock with " << Duration::period::den
+              << " precision, should be ~100ms";
+  }
+
+  {
+    const auto start = Clock::now();
+    const auto deadline = time_point_cast<Duration>(
+        start - 2 * start.time_since_epoch());
+    EXPECT_EQ(f.futexWaitUntil(0, deadline), FutexResult::TIMEDOUT);
+    LOG(INFO) << "Futex wait with invalid deadline timed out after waiting for "
+              << duration_cast<milliseconds>(Clock::now() - start).count()
+              << "ms using clock with " << Duration::period::den
+              << " precision, should be ~0ms";
+  }
 }
 
 template <typename Clock>
@@ -92,14 +109,17 @@ void deterministicAtomicWaitUntilTests() {
 
   // Futex wait must eventually fail with either FutexResult::TIMEDOUT or
   // FutexResult::INTERRUPTED
-  auto res = f.futexWaitUntil(0, Clock::now() + milliseconds(100));
+  const auto res = f.futexWaitUntil(0, Clock::now() + milliseconds(100));
   EXPECT_TRUE(res == FutexResult::TIMEDOUT || res == FutexResult::INTERRUPTED);
 }
 
 template<template<typename> class Atom>
 void run_wait_until_tests() {
-  liveClockWaitUntilTests<Atom, system_clock>();
-  liveClockWaitUntilTests<Atom, steady_clock>();
+  liveClockWaitUntilTests<Atom, system_clock, system_clock::duration>();
+  liveClockWaitUntilTests<Atom, steady_clock, steady_clock::duration>();
+
+  typedef duration<int64_t, std::ratio<1, 10000000>> decimicroseconds;
+  liveClockWaitUntilTests<Atom, system_clock, decimicroseconds>();
 }
 
 template <>
@@ -118,7 +138,7 @@ void run_system_clock_test() {
   struct timespec ts;
   const int maxIters = 1000;
   int iter = 0;
-  uint64_t delta = 10000000 /* 10 ms */;
+  const uint64_t delta = 10000000 /* 10 ms */;
 
   /** The following loop is only to make the test more robust in the presence of
    * clock adjustments that can occur. We just run the loop maxIter times and
@@ -150,16 +170,31 @@ void run_steady_clock_test() {
    * for the time_points */
   EXPECT_TRUE(steady_clock::is_steady);
 
-  uint64_t A = duration_cast<nanoseconds>(steady_clock::now()
-                                          .time_since_epoch()).count();
+  const uint64_t A = duration_cast<nanoseconds>(steady_clock::now()
+                                                .time_since_epoch()).count();
 
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  uint64_t B = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+  const uint64_t B = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 
-  uint64_t C = duration_cast<nanoseconds>(steady_clock::now()
-                                          .time_since_epoch()).count();
+  const uint64_t C = duration_cast<nanoseconds>(steady_clock::now()
+                                                .time_since_epoch()).count();
   EXPECT_TRUE(A <= B && B <= C);
+}
+
+template <template <typename> class Atom>
+void run_wake_blocked_test() {
+  Futex<Atom> f(0);
+
+  auto thr = DSched::thread([&] { EXPECT_TRUE(f.futexWait(0)); });
+
+  // A sleep here guarantees to a large extent that 'thr' will execute
+  // futexWait before we wake it up, thus testing late futexWake.
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+  f.store(1);
+  f.futexWake(1);
+  DSched::join(thr);
 }
 
 TEST(Futex, clock_source) {
@@ -188,8 +223,10 @@ TEST(Futex, basic_deterministic) {
   run_wait_until_tests<DeterministicAtomic>();
 }
 
-int main(int argc, char ** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  return RUN_ALL_TESTS();
+TEST(Futex, wake_blocked_live) {
+  run_wake_blocked_test<std::atomic>();
+}
+
+TEST(Futex, wake_blocked_emulated) {
+  run_wake_blocked_test<EmulatedFutexAtomic>();
 }

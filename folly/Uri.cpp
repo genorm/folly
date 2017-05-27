@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ namespace folly {
 
 namespace {
 
-fbstring submatch(const boost::cmatch& m, size_t idx) {
+fbstring submatch(const boost::cmatch& m, int idx) {
   auto& sub = m[idx];
   return fbstring(sub.first, sub.second);
 }
@@ -31,13 +31,13 @@ fbstring submatch(const boost::cmatch& m, size_t idx) {
 template <class String>
 void toLower(String& s) {
   for (auto& c : s) {
-    c = tolower(c);
+    c = char(tolower(c));
   }
 }
 
 }  // namespace
 
-Uri::Uri(StringPiece str) : port_(0) {
+Uri::Uri(StringPiece str) : hasAuthority_(false), port_(0) {
   static const boost::regex uriRegex(
       "([a-zA-Z][a-zA-Z0-9+.-]*):"  // scheme:
       "([^?#]*)"                    // authority and path
@@ -60,6 +60,7 @@ Uri::Uri(StringPiece str) : port_(0) {
                           authorityAndPathMatch,
                           authorityAndPathRegex)) {
     // Does not start with //, doesn't have authority
+    hasAuthority_ = false;
     path_ = authorityAndPath.fbstr();
   } else {
     static const boost::regex authorityRegex(
@@ -84,6 +85,7 @@ Uri::Uri(StringPiece str) : port_(0) {
       port_ = to<uint16_t>(port);
     }
 
+    hasAuthority_ = true;
     username_ = submatch(authorityMatch, 1);
     password_ = submatch(authorityMatch, 2);
     host_ = submatch(authorityMatch, 3);

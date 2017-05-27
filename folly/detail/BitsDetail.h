@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_DETAIL_BITSDETAIL_H_
-#define FOLLY_DETAIL_BITSDETAIL_H_
+#pragma once
 
 namespace folly {
 namespace detail {
@@ -26,10 +25,10 @@ namespace detail {
 // (see Bits.cpp)
 #ifdef _MSC_VER
 inline int popcount(unsigned int x) {
-  return __popcnt(x);
+  return int(__popcnt(x));
 }
 inline int popcountll(unsigned long long x) {
-  return __popcnt64(x);
+  return int(__popcnt64(x));
 }
 #elif defined(__POPCNT__)
 
@@ -49,5 +48,3 @@ int popcountll(unsigned long long x);
 
 }  // namespace detail
 }  // namespace folly
-
-#endif /* FOLLY_DETAIL_BITSDETAIL_H_ */

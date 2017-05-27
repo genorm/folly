@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,18 +22,6 @@
 #include <random>
 #include <string>
 
-namespace folly { namespace detail {
-// declaration of functions in Range.cpp
-size_t qfind_first_byte_of_memchr(const StringPiece haystack,
-                                  const StringPiece needles);
-
-size_t qfind_first_byte_of_byteset(const StringPiece haystack,
-                                   const StringPiece needles);
-
-size_t qfind_first_byte_of_nosse(const StringPiece haystack,
-                                 const StringPiece needles);
-}}
-
 using namespace folly;
 using namespace std;
 
@@ -43,10 +31,14 @@ std::string str;
 constexpr int kVstrSize = 16;
 std::vector<std::string> vstr;
 std::vector<StringPiece> vstrp;
+std::string file;
 
 void initStr(int len) {
-  cout << "string length " << len << ':' << endl;
   str.clear();
+  vstr.clear();
+  vstrp.clear();
+
+  cout << "string length " << len << ':' << endl;
   str.reserve(len + 1);
   str.append(len, 'a');
   str.append(1, 'b');
@@ -73,6 +65,19 @@ std::mt19937 rnd;
 string ffoTestString;
 const size_t ffoDelimSize = 128;
 vector<string> ffoDelim;
+
+void initFile(int len) {
+  std::uniform_int_distribution<uint32_t> validChar(1, 64);
+  file.clear();
+  while (len--) {
+    char ch = validChar(rnd);
+    if (ch == '\r') {
+      ch = '\n';
+    }
+    file.push_back(ch);
+  }
+}
+
 
 string generateString(int len) {
   std::uniform_int_distribution<uint32_t> validChar(1, 255);  // no null-char
@@ -130,21 +135,53 @@ BENCHMARK_RELATIVE(FindSingleCharRange, n) {
 
 BENCHMARK_DRAW_LINE();
 
-// it's useful to compare our custom implementations vs. the standard library
-inline size_t qfind_first_byte_of_std(const StringPiece haystack,
-                                      const StringPiece needles) {
-  return qfind_first_of(haystack, needles, asciiCaseSensitive);
+template <class Func>
+void countHits(Func func, size_t n) {
+  StringPiece needles = "\r\n\1";
+  FOR_EACH_RANGE (i, 0, n) {
+    size_t p, c = 0;
+    for (StringPiece left = file;
+         (p = func(left, needles)) != StringPiece::npos;
+         left.advance(p + 1)) {
+      ++c;
+    }
+    doNotOptimizeAway(c);
+  }
 }
 
 template <class Func>
 void findFirstOfRange(StringPiece needles, Func func, size_t n) {
   FOR_EACH_RANGE (i, 0, n) {
-    const StringPiece haystack = vstr[i % kVstrSize];
+    const StringPiece haystack = vstrp[i % kVstrSize];
     doNotOptimizeAway(func(haystack, needles));
     char x = haystack[0];
     doNotOptimizeAway(&x);
   }
 }
+
+const string delims1 = "b";
+
+BENCHMARK(FindFirstOf1NeedlesBase, n) {
+  findFirstOfRange(delims1, detail::qfind_first_byte_of, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf1NeedlesNoSSE, n) {
+  findFirstOfRange(delims1, detail::qfind_first_byte_of_nosse, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf1NeedlesStd, n) {
+  findFirstOfRange(delims1, detail::qfind_first_byte_of_std, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf1NeedlesByteSet, n) {
+  findFirstOfRange(delims1, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf1NeedlesBitSet, n) {
+  findFirstOfRange(delims1, detail::qfind_first_byte_of_bitset, n);
+}
+
+BENCHMARK_DRAW_LINE();
 
 const string delims2 = "bc";
 
@@ -157,15 +194,15 @@ BENCHMARK_RELATIVE(FindFirstOf2NeedlesNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOf2NeedlesStd, n) {
-  findFirstOfRange(delims2, qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOf2NeedlesMemchr, n) {
-  findFirstOfRange(delims2, detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRange(delims2, detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf2NeedlesByteSet, n) {
   findFirstOfRange(delims2, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf2NeedlesBitSet, n) {
+  findFirstOfRange(delims2, detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -181,15 +218,15 @@ BENCHMARK_RELATIVE(FindFirstOf4NeedlesNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOf4NeedlesStd, n) {
-  findFirstOfRange(delims4, qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOf4NeedlesMemchr, n) {
-  findFirstOfRange(delims4, detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRange(delims4, detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf4NeedlesByteSet, n) {
   findFirstOfRange(delims4, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf4NeedlesBitSet, n) {
+  findFirstOfRange(delims4, detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -205,15 +242,15 @@ BENCHMARK_RELATIVE(FindFirstOf8NeedlesNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOf8NeedlesStd, n) {
-  findFirstOfRange(delims8, qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOf8NeedlesMemchr, n) {
-  findFirstOfRange(delims8, detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRange(delims8, detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf8NeedlesByteSet, n) {
   findFirstOfRange(delims8, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf8NeedlesBitSet, n) {
+  findFirstOfRange(delims8, detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -229,15 +266,15 @@ BENCHMARK_RELATIVE(FindFirstOf16NeedlesNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOf16NeedlesStd, n) {
-  findFirstOfRange(delims16, qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOf16NeedlesMemchr, n) {
-  findFirstOfRange(delims16, detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRange(delims16, detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf16NeedlesByteSet, n) {
   findFirstOfRange(delims16, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf16NeedlesBitSet, n) {
+  findFirstOfRange(delims16, detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -253,15 +290,15 @@ BENCHMARK_RELATIVE(FindFirstOf32NeedlesNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOf32NeedlesStd, n) {
-  findFirstOfRange(delims32, qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOf32NeedlesMemchr, n) {
-  findFirstOfRange(delims32, detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRange(delims32, detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf32NeedlesByteSet, n) {
   findFirstOfRange(delims32, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf32NeedlesBitSet, n) {
+  findFirstOfRange(delims32, detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -278,15 +315,15 @@ BENCHMARK_RELATIVE(FindFirstOf64NeedlesNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOf64NeedlesStd, n) {
-  findFirstOfRange(delims64, qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOf64NeedlesMemchr, n) {
-  findFirstOfRange(delims64, detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRange(delims64, detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf64NeedlesByteSet, n) {
   findFirstOfRange(delims64, detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOf64NeedlesBitSet, n) {
+  findFirstOfRange(delims64, detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -309,15 +346,37 @@ BENCHMARK_RELATIVE(FindFirstOfRandomNoSSE, n) {
 }
 
 BENCHMARK_RELATIVE(FindFirstOfRandomStd, n) {
-  findFirstOfRandom(qfind_first_byte_of_std, n);
-}
-
-BENCHMARK_RELATIVE(FindFirstOfRandomMemchr, n) {
-  findFirstOfRandom(detail::qfind_first_byte_of_memchr, n);
+  findFirstOfRandom(detail::qfind_first_byte_of_std, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOfRandomByteSet, n) {
   findFirstOfRandom(detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(FindFirstOfRandomBitSet, n) {
+  findFirstOfRandom(detail::qfind_first_byte_of_bitset, n);
+}
+
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK(CountDelimsBase, n) {
+  countHits(detail::qfind_first_byte_of, n);
+}
+
+BENCHMARK_RELATIVE(CountDelimsNoSSE, n) {
+  countHits(detail::qfind_first_byte_of_nosse, n);
+}
+
+BENCHMARK_RELATIVE(CountDelimsStd, n) {
+  countHits(detail::qfind_first_byte_of_std, n);
+}
+
+BENCHMARK_RELATIVE(CountDelimsByteSet, n) {
+  countHits(detail::qfind_first_byte_of_byteset, n);
+}
+
+BENCHMARK_RELATIVE(CountDelimsBitSet, n) {
+  countHits(detail::qfind_first_byte_of_bitset, n);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -342,6 +401,7 @@ int main(int argc, char** argv) {
   for (int len : {1, 8, 10, 16, 32, 64, 128, 256, 10*1024, 1024*1024}) {
     initStr(len);
     initDelims(len);
+    initFile(len);
     runBenchmarks();
   }
   return 0;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,29 +16,33 @@
 
 #pragma once
 
-#include <pthread.h>
+#include <string>
+#include <thread>
+
+#include <folly/Optional.h>
 #include <folly/Range.h>
+#include <folly/portability/Config.h>
+#include <folly/portability/PThread.h>
 
 namespace folly {
+/**
+ * This returns true if the current platform supports setting the name of the
+ * current thread.
+ */
+bool canSetCurrentThreadName();
+/**
+ * This returns true if the current platform supports setting the name of
+ * threads other than the one currently executing.
+ */
+bool canSetOtherThreadName();
+/**
+ * Get the name of the current string, or nothing if an error occurs.
+ */
+Optional<std::string> getCurrentThreadName();
 
-// This looks a bit weird, but it's necessary to avoid
-// having an undefined compiler function called.
-#if defined(__GLIBC__) && !defined(__APPLE__) && !defined(__ANDROID__)
-#if __GLIBC_PREREQ(2, 12)
-# define FOLLY_HAS_PTHREAD_SETNAME_NP
+bool setThreadName(std::thread::id tid, StringPiece name);
+#if FOLLY_HAVE_PTHREAD
+bool setThreadName(pthread_t pid, StringPiece name);
 #endif
-#endif
-
-inline bool setThreadName(pthread_t id, StringPiece name) {
-#ifdef FOLLY_HAS_PTHREAD_SETNAME_NP
-  return 0 == pthread_setname_np(id, name.fbstr().substr(0, 15).c_str());
-#else
-  return false;
-#endif
-}
-
-inline bool setThreadName(StringPiece name) {
-  return setThreadName(pthread_self(), name);
-}
-
+bool setThreadName(StringPiece name);
 }

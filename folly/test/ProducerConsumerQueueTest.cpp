@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,15 @@
 
 #include <folly/ProducerConsumerQueue.h>
 
-#include <gtest/gtest.h>
-#include <vector>
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <vector>
+
 #include <glog/logging.h>
+
+#include <folly/portability/GTest.h>
 
 //////////////////////////////////////////////////////////////////////
 
@@ -34,7 +36,7 @@ template<class T> struct TestTraits {
 };
 
 template<> struct TestTraits<std::string> {
-  int limit() const { return 1 << 22; }
+  unsigned int limit() const { return 1 << 22; }
   std::string generate() const { return std::string(12, ' '); }
 };
 
@@ -61,7 +63,10 @@ struct PerfTest {
   }
 
   void producer() {
-    for (int i = 0; i < traits_.limit(); ++i) {
+    // This is written differently than you might expect so that
+    // it does not run afoul of -Wsign-compare, regardless of the
+    // signedness of this loop's upper bound.
+    for (auto i = traits_.limit(); i > 0; --i) {
       while (!queue_.write(traits_.generate())) {
       }
     }
@@ -112,7 +117,7 @@ struct CorrectnessTest {
   {
     const size_t testSize = traits_.limit();
     testData_.reserve(testSize);
-    for (int i = 0; i < testSize; ++i) {
+    for (size_t i = 0; i < testSize; ++i) {
       testData_.push_back(traits_.generate());
     }
   }
@@ -157,11 +162,11 @@ struct CorrectnessTest {
         } else {
           goto again;
         }
+        EXPECT_EQ(*data, expect);
       } else {
+        EXPECT_EQ(*data, expect);
         queue_.popFront();
       }
-
-      EXPECT_EQ(*data, expect);
     }
   }
 
@@ -200,13 +205,13 @@ void correctnessTestType(const std::string& type) {
 }
 
 struct DtorChecker {
-  static int numInstances;
+  static unsigned int numInstances;
   DtorChecker() { ++numInstances; }
-  DtorChecker(const DtorChecker& o) { ++numInstances; }
+  DtorChecker(const DtorChecker& /* o */) { ++numInstances; }
   ~DtorChecker() { --numInstances; }
 };
 
-int DtorChecker::numInstances = 0;
+unsigned int DtorChecker::numInstances = 0;
 
 }
 

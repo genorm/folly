@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,10 @@
 #include <vector>
 
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 
 #include <folly/Benchmark.h>
 #include <folly/Random.h>
+#include <folly/portability/GTest.h>
 
 DEFINE_int32(random_seed, folly::randomNumberSeed(), "random seed");
 
@@ -63,6 +63,24 @@ void testVarint(uint64_t val, std::initializer_list<uint8_t> bytes) {
       EXPECT_EQ(kMaxVarintLength64 - n, r.size());
     }
   }
+}
+
+TEST(Varint, Interface) {
+  // Make sure decodeVarint() accepts all of StringPiece, MutableStringPiece,
+  // ByteRange, and MutableByteRange.
+  char c = 0;
+
+  StringPiece sp(&c, 1);
+  EXPECT_EQ(decodeVarint(sp), 0);
+
+  MutableStringPiece msp(&c, 1);
+  EXPECT_EQ(decodeVarint(msp), 0);
+
+  ByteRange br(reinterpret_cast<unsigned char*>(&c), 1);
+  EXPECT_EQ(decodeVarint(br), 0);
+
+  MutableByteRange mbr(reinterpret_cast<unsigned char*>(&c), 1);
+  EXPECT_EQ(decodeVarint(mbr), 0);
 }
 
 TEST(Varint, Simple) {
@@ -145,7 +163,6 @@ void generateRandomValues() {
 BENCHMARK(VarintEncoding, iters) {
   uint8_t* start = &(*gEncoded.begin());
   uint8_t* p = start;
-  bool empty = (iters == 0);
   while (iters--) {
     p = start;
     for (auto& v : gValues) {

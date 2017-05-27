@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,12 @@
 
 #include <folly/IndexedMemPool.h>
 #include <folly/test/DeterministicSchedule.h>
+#include <folly/portability/GTest.h>
+#include <folly/portability/Unistd.h>
+
+#include <string>
 #include <thread>
-#include <unistd.h>
 #include <semaphore.h>
-#include <gflags/gflags.h>
-#include <gtest/gtest.h>
 
 using namespace folly;
 using namespace folly::test;
@@ -43,13 +44,13 @@ TEST(IndexedMemPool, unique_ptr) {
       break;
     }
     leak.emplace_back(std::move(ptr));
-    EXPECT_LT(leak.size(), 10000);
+    EXPECT_LT(leak.size(), 10000u);
   }
 }
 
 TEST(IndexedMemPool, no_starvation) {
   const int count = 1000;
-  const int poolSize = 100;
+  const uint32_t poolSize = 100;
 
   typedef DeterministicSchedule Sched;
   Sched sched(Sched::uniform(0));
@@ -74,7 +75,7 @@ TEST(IndexedMemPool, no_starvation) {
       for (auto i = 0; i < count; ++i) {
         Sched::wait(&allocSem);
         uint32_t idx = pool.allocIndex();
-        EXPECT_NE(idx, 0);
+        EXPECT_NE(idx, 0u);
         EXPECT_LE(idx,
             poolSize + (pool.NumLocalLists - 1) * pool.LocalListLimit);
         pool[idx] = i;
@@ -89,7 +90,7 @@ TEST(IndexedMemPool, no_starvation) {
         Sched::wait(&readSem);
         EXPECT_EQ(read(fd[0], &idx, sizeof(idx)), sizeof(idx));
         EXPECT_NE(idx, 0);
-        EXPECT_GE(idx, 1);
+        EXPECT_GE(idx, 1u);
         EXPECT_LE(idx,
             poolSize + (Pool::NumLocalLists - 1) * Pool::LocalListLimit);
         EXPECT_EQ(pool[idx], i);
@@ -110,12 +111,12 @@ TEST(IndexedMemPool, st_capacity) {
   typedef IndexedMemPool<int,1,32> Pool;
   Pool pool(10);
 
-  EXPECT_EQ(pool.capacity(), 10);
-  EXPECT_EQ(Pool::maxIndexForCapacity(10), 10);
+  EXPECT_EQ(pool.capacity(), 10u);
+  EXPECT_EQ(Pool::maxIndexForCapacity(10), 10u);
   for (auto i = 0; i < 10; ++i) {
-    EXPECT_NE(pool.allocIndex(), 0);
+    EXPECT_NE(pool.allocIndex(), 0u);
   }
-  EXPECT_EQ(pool.allocIndex(), 0);
+  EXPECT_EQ(pool.allocIndex(), 0u);
 }
 
 TEST(IndexedMemPool, mt_capacity) {
@@ -127,7 +128,7 @@ TEST(IndexedMemPool, mt_capacity) {
     threads[i] = std::thread([&]() {
       for (auto j = 0; j < 100; ++j) {
         uint32_t idx = pool.allocIndex();
-        EXPECT_NE(idx, 0);
+        EXPECT_NE(idx, 0u);
       }
     });
   }
@@ -139,7 +140,7 @@ TEST(IndexedMemPool, mt_capacity) {
   for (auto i = 0; i < 16 * 32; ++i) {
     pool.allocIndex();
   }
-  EXPECT_EQ(pool.allocIndex(), 0);
+  EXPECT_EQ(pool.allocIndex(), 0u);
 }
 
 TEST(IndexedMemPool, locate_elem) {
@@ -155,8 +156,138 @@ TEST(IndexedMemPool, locate_elem) {
   EXPECT_EQ(pool.locateElem(nullptr), 0);
 }
 
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  return RUN_ALL_TESTS();
+struct NonTrivialStruct {
+  static FOLLY_TLS size_t count;
+
+  size_t elem_;
+
+  NonTrivialStruct() {
+    elem_ = 0;
+    ++count;
+  }
+
+  NonTrivialStruct(std::unique_ptr<std::string>&& arg1, size_t arg2) {
+    elem_ = arg1->length() + arg2;
+    ++count;
+  }
+
+  ~NonTrivialStruct() {
+    --count;
+  }
+};
+
+FOLLY_TLS size_t NonTrivialStruct::count;
+
+TEST(IndexedMemPool, eager_recycle) {
+  typedef IndexedMemPool<NonTrivialStruct> Pool;
+  Pool pool(100);
+
+  EXPECT_EQ(NonTrivialStruct::count, 0);
+
+  for (size_t i = 0; i < 10; ++i) {
+    {
+      std::unique_ptr<std::string> arg{ new std::string{ "abc" } };
+      auto ptr = pool.allocElem(std::move(arg), 100);
+      EXPECT_EQ(NonTrivialStruct::count, 1);
+      EXPECT_EQ(ptr->elem_, 103);
+      EXPECT_TRUE(!!ptr);
+    }
+    EXPECT_EQ(NonTrivialStruct::count, 0);
+  }
+}
+
+TEST(IndexedMemPool, late_recycle) {
+  {
+    typedef IndexedMemPool<NonTrivialStruct, 8, 8, std::atomic, false, false>
+        Pool;
+    Pool pool(100);
+
+    EXPECT_EQ(NonTrivialStruct::count, 0);
+
+    for (size_t i = 0; i < 10; ++i) {
+      {
+        auto ptr = pool.allocElem();
+        EXPECT_TRUE(NonTrivialStruct::count > 0);
+        EXPECT_TRUE(!!ptr);
+        ptr->elem_ = i;
+      }
+      EXPECT_TRUE(NonTrivialStruct::count > 0);
+    }
+  }
+  EXPECT_EQ(NonTrivialStruct::count, 0);
+}
+
+TEST(IndexedMemPool, no_data_races) {
+  const int count = 1000;
+  const uint32_t poolSize = 100;
+  const int nthreads = 10;
+
+  using Pool = IndexedMemPool<int, 8, 8>;
+  Pool pool(poolSize);
+
+  std::vector<std::thread> thr(nthreads);
+  for (auto i = 0; i < nthreads; ++i) {
+    thr[i] = std::thread([&]() {
+      for (auto j = 0; j < count; ++j) {
+        uint32_t idx = pool.allocIndex();
+        EXPECT_NE(idx, 0u);
+        EXPECT_LE(
+            idx, poolSize + (pool.NumLocalLists - 1) * pool.LocalListLimit);
+        pool[idx] = j;
+        pool.recycleIndex(idx);
+      }
+    });
+  }
+  for (auto& t : thr) {
+    t.join();
+  }
+}
+
+std::atomic<int> cnum{0};
+std::atomic<int> dnum{0};
+
+TEST(IndexedMemPool, construction_destruction) {
+  struct Foo {
+    Foo() {
+      cnum.fetch_add(1);
+    }
+    ~Foo() {
+      dnum.fetch_add(1);
+    }
+  };
+
+  std::atomic<bool> start{false};
+  std::atomic<int> started{0};
+
+  using Pool = IndexedMemPool<Foo, 1, 1, std::atomic, false, false>;
+  int nthreads = 20;
+  int count = 1000;
+
+  {
+    Pool pool(2);
+    std::vector<std::thread> thr(nthreads);
+    for (auto i = 0; i < nthreads; ++i) {
+      thr[i] = std::thread([&]() {
+        started.fetch_add(1);
+        while (!start.load())
+          ;
+        for (auto j = 0; j < count; ++j) {
+          uint32_t idx = pool.allocIndex();
+          if (idx != 0) {
+            pool.recycleIndex(idx);
+          }
+        }
+      });
+    }
+
+    while (started.load() < nthreads)
+      ;
+    start.store(true);
+
+    for (auto& t : thr) {
+      t.join();
+    }
+  }
+
+  CHECK_EQ(cnum.load(), dnum.load());
 }

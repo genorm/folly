@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_MEMORYMAPPING_H_
-#define FOLLY_MEMORYMAPPING_H_
+#pragma once
 
 #include <folly/FBString.h>
 #include <folly/File.h>
@@ -53,7 +52,7 @@ class MemoryMapping : boost::noncopyable {
    * likely become inaccessible) when the MemoryMapping object is destroyed.
    */
   struct Options {
-    Options() { }
+    Options() {}
 
     // Convenience methods; return *this for chaining.
     Options& setPageSize(off_t v) { pageSize = v; return *this; }
@@ -157,6 +156,7 @@ class MemoryMapping : boost::noncopyable {
    * Advise the kernel about memory access.
    */
   void advise(int advice) const;
+  void advise(int advice, size_t offset, size_t length) const;
 
   /**
    * A bitwise cast of the mapped bytes as range of values. Only intended for
@@ -249,5 +249,3 @@ void alignedForwardMemcpy(void* dest, const void* src, size_t size);
 void mmapFileCopy(const char* src, const char* dest, mode_t mode = 0666);
 
 }  // namespace folly
-
-#endif /* FOLLY_MEMORYMAPPING_H_ */

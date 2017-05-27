@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_PADDED_H_
-#define FOLLY_PADDED_H_
+#pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -28,6 +28,7 @@
 #include <boost/iterator/iterator_adaptor.hpp>
 
 #include <folly/Portability.h>
+#include <folly/ContainerTraits.h>
 
 /**
  * Code that aids in storing data aligned on block (possibly cache-line)
@@ -344,13 +345,14 @@ class Adaptor {
       lastCount_(lastCount) {
   }
   explicit Adaptor(size_t n, const value_type& value = value_type())
-    : c_(Node::nodeCount(n), fullNode(value)),
-      lastCount_(n % Node::kElementCount ?: Node::kElementCount) {
+    : c_(Node::nodeCount(n), fullNode(value)) {
+    const auto count = n % Node::kElementCount;
+    lastCount_ = count != 0 ? count : Node::kElementCount;
   }
 
   Adaptor(const Adaptor&) = default;
   Adaptor& operator=(const Adaptor&) = default;
-  Adaptor(Adaptor&& other)
+  Adaptor(Adaptor&& other) noexcept
     : c_(std::move(other.c_)),
       lastCount_(other.lastCount_) {
     other.lastCount_ = Node::kElementCount;
@@ -383,7 +385,7 @@ class Adaptor {
   iterator end() {
     auto it = iterator(c_.end());
     if (lastCount_ != Node::kElementCount) {
-      it -= (Node::kElementCount - lastCount_);
+      it -= difference_type(Node::kElementCount - lastCount_);
     }
     return it;
   }
@@ -424,12 +426,13 @@ class Adaptor {
     return c_.back().data()[lastCount_ - 1];
   }
 
+  template <typename... Args>
+  void emplace_back(Args&&... args) {
+    new (allocate_back()) value_type(std::forward<Args>(args)...);
+  }
+
   void push_back(value_type x) {
-    if (lastCount_ == Node::kElementCount) {
-      c_.push_back(Node());
-      lastCount_ = 0;
-    }
-    c_.back().data()[lastCount_++] = std::move(x);
+    emplace_back(std::move(x));
   }
 
   void pop_back() {
@@ -490,6 +493,14 @@ class Adaptor {
   }
 
  private:
+  value_type* allocate_back() {
+    if (lastCount_ == Node::kElementCount) {
+      container_emplace_back_or_push_back(c_);
+      lastCount_ = 0;
+    }
+    return &c_.back().data()[lastCount_++];
+  }
+
   static Node fullNode(const value_type& value) {
     Node n;
     std::fill(n.data(), n.data() + kElementsPerNode, value);
@@ -501,5 +512,3 @@ class Adaptor {
 
 }  // namespace padded
 }  // namespace folly
-
-#endif /* FOLLY_PADDED_H_ */

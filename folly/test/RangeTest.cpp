@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,11 @@
 
 #include <folly/Range.h>
 
-#include <sys/mman.h>
+#include <folly/portability/GTest.h>
+#include <folly/portability/Memory.h>
+#include <folly/portability/SysMman.h>
+
 #include <array>
-#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <random>
@@ -29,20 +31,10 @@
 #include <type_traits>
 #include <vector>
 #include <boost/range/concepts.hpp>
-#include <gtest/gtest.h>
-
-namespace folly { namespace detail {
-
-// declaration of functions in Range.cpp
-size_t qfind_first_byte_of_memchr(const StringPiece haystack,
-                                  const StringPiece needles);
-
-size_t qfind_first_byte_of_byteset(const StringPiece haystack,
-                                   const StringPiece needles);
-
-}}  // namespaces
+#include <boost/algorithm/string/trim.hpp>
 
 using namespace folly;
+using namespace folly::detail;
 using namespace std;
 
 static_assert(std::is_literal_type<StringPiece>::value, "");
@@ -301,17 +293,17 @@ TEST(StringPiece, InvalidRange) {
   EXPECT_THROW(a.subpiece(6), std::out_of_range);
 }
 
-#if FOLLY_HAVE_CONSTEXPR_STRLEN
-constexpr char helloArray[] = "hello";
-
 TEST(StringPiece, Constexpr) {
+  constexpr const char* helloArray = "hello";
+
   constexpr StringPiece hello1("hello");
   EXPECT_EQ("hello", hello1);
+  static_assert(hello1.size() == 5, "hello size should be 5 at compile time");
 
   constexpr StringPiece hello2(helloArray);
   EXPECT_EQ("hello", hello2);
+  static_assert(hello2.size() == 5, "hello size should be 5 at compile time");
 }
-#endif
 
 TEST(StringPiece, Prefix) {
   StringPiece a("hello");
@@ -322,6 +314,15 @@ TEST(StringPiece, Prefix) {
   EXPECT_FALSE(a.startsWith("hellox"));
   EXPECT_FALSE(a.startsWith('x'));
   EXPECT_FALSE(a.startsWith("x"));
+
+  EXPECT_TRUE(a.startsWith("", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.startsWith("hello", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.startsWith("hellO", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.startsWith("HELL", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.startsWith("H", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.startsWith("HELLOX", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.startsWith("x", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.startsWith("X", folly::AsciiCaseInsensitive()));
 
   {
     auto b = a;
@@ -369,6 +370,16 @@ TEST(StringPiece, Suffix) {
   EXPECT_FALSE(a.endsWith("xhello"));
   EXPECT_FALSE(a.endsWith("x"));
   EXPECT_FALSE(a.endsWith('x'));
+
+  EXPECT_TRUE(a.endsWith("", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.endsWith("o", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.endsWith("O", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.endsWith("hello", folly::AsciiCaseInsensitive()));
+  EXPECT_TRUE(a.endsWith("hellO", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.endsWith("xhello", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.endsWith("Xhello", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.endsWith("x", folly::AsciiCaseInsensitive()));
+  EXPECT_FALSE(a.endsWith("X", folly::AsciiCaseInsensitive()));
 
   {
     auto b = a;
@@ -431,6 +442,43 @@ TEST(StringPiece, SuffixEmpty) {
   EXPECT_EQ("", a);
   EXPECT_FALSE(a.removeSuffix('a'));
   EXPECT_EQ("", a);
+}
+
+TEST(StringPiece, erase) {
+  StringPiece a("hello");
+  auto b = a.begin();
+  auto e = b + 1;
+  a.erase(b, e);
+  EXPECT_EQ("ello", a);
+
+  e = a.end();
+  b = e - 1;
+  a.erase(b, e);
+  EXPECT_EQ("ell", a);
+
+  b = a.end() - 1;
+  e = a.end() - 1;
+  EXPECT_THROW(a.erase(b, e), std::out_of_range);
+
+  b = a.begin();
+  e = a.end();
+  a.erase(b, e);
+  EXPECT_EQ("", a);
+
+  a = "hello";
+  b = a.begin();
+  e = b + 2;
+  a.erase(b, e);
+  EXPECT_EQ("llo", a);
+
+  b = a.end() - 2;
+  e = a.end();
+  a.erase(b, e);
+  EXPECT_EQ("l", a);
+
+  a = "      hello  ";
+  boost::algorithm::trim(a);
+  EXPECT_EQ(a, "hello");
 }
 
 TEST(StringPiece, split_step_char_delimiter) {
@@ -805,6 +853,16 @@ TEST(StringPiece, split_step_with_process_range_delimiter_additional_args) {
   EXPECT_TRUE(p.empty());
 }
 
+TEST(StringPiece, NoInvalidImplicitConversions) {
+  struct IsString {
+    bool operator()(folly::Range<int*>) { return false; }
+    bool operator()(folly::StringPiece) { return true; }
+  };
+
+  std::string s = "hello";
+  EXPECT_TRUE(IsString()(s));
+}
+
 TEST(qfind, UInt32_Ranges) {
   vector<uint32_t> a({1, 2, 3, 260, 5});
   vector<uint32_t> b({2, 3, 4});
@@ -840,19 +898,14 @@ struct NoSseNeedleFinder {
   }
 };
 
-struct MemchrNeedleFinder {
-  static size_t find_first_byte_of(StringPiece haystack, StringPiece needles) {
-    return detail::qfind_first_byte_of_memchr(haystack, needles);
-  }
-};
-
 struct ByteSetNeedleFinder {
   static size_t find_first_byte_of(StringPiece haystack, StringPiece needles) {
     return detail::qfind_first_byte_of_byteset(haystack, needles);
   }
 };
 
-typedef ::testing::Types<SseNeedleFinder, NoSseNeedleFinder, MemchrNeedleFinder,
+typedef ::testing::Types<SseNeedleFinder,
+                         NoSseNeedleFinder,
                          ByteSetNeedleFinder> NeedleFinders;
 TYPED_TEST_CASE(NeedleFinderTest, NeedleFinders);
 
@@ -897,7 +950,7 @@ TYPED_TEST(NeedleFinderTest, Unaligned) {
   string s = "0123456789ABCDEFGH";
   for (size_t i = 0; i < s.size(); ++i) {
     StringPiece a(s.c_str() + i);
-    for (int j = 0; j < s.size(); ++j) {
+    for (size_t j = 0; j < s.size(); ++j) {
       StringPiece b(s.c_str() + j);
       EXPECT_EQ((i > j) ? 0 : j - i, this->find_first_byte_of(a, b));
     }
@@ -912,17 +965,17 @@ TYPED_TEST(NeedleFinderTest, Needles256) {
   const auto maxValue = std::numeric_limits<StringPiece::value_type>::max();
   // make the size ~big to avoid any edge-case branches for tiny haystacks
   const int haystackSize = 50;
-  for (size_t i = minValue; i <= maxValue; i++) {  // <=
+  for (int i = minValue; i <= maxValue; i++) { // <=
     needles.push_back(i);
   }
   EXPECT_EQ(StringPiece::npos, this->find_first_byte_of("", needles));
-  for (size_t i = minValue; i <= maxValue; i++) {
+  for (int i = minValue; i <= maxValue; i++) {
     EXPECT_EQ(0, this->find_first_byte_of(string(haystackSize, i), needles));
   }
 
   needles.append("these are redundant characters");
   EXPECT_EQ(StringPiece::npos, this->find_first_byte_of("", needles));
-  for (size_t i = minValue; i <= maxValue; i++) {
+  for (int i = minValue; i <= maxValue; i++) {
     EXPECT_EQ(0, this->find_first_byte_of(string(haystackSize, i), needles));
   }
 }
@@ -946,18 +999,22 @@ const size_t kPageSize = 4096;
 void createProtectedBuf(StringPiece& contents, char** buf) {
   ASSERT_LE(contents.size(), kPageSize);
   const size_t kSuccess = 0;
-  if (kSuccess != posix_memalign((void**)buf, kPageSize, 4 * kPageSize)) {
+  char* pageAlignedBuf = (char*)aligned_malloc(2 * kPageSize, kPageSize);
+  if (pageAlignedBuf == nullptr) {
     ASSERT_FALSE(true);
   }
-  mprotect(*buf + kPageSize, kPageSize, PROT_NONE);
+  // Protect the page after the first full page-aligned region of the
+  // malloc'ed buffer
+  mprotect(pageAlignedBuf + kPageSize, kPageSize, PROT_NONE);
   size_t newBegin = kPageSize - contents.size();
-  memcpy(*buf + newBegin, contents.data(), contents.size());
-  contents.reset(*buf + newBegin, contents.size());
+  memcpy(pageAlignedBuf + newBegin, contents.data(), contents.size());
+  contents.reset(pageAlignedBuf + newBegin, contents.size());
+  *buf = pageAlignedBuf;
 }
 
 void freeProtectedBuf(char* buf) {
   mprotect(buf + kPageSize, kPageSize, PROT_READ | PROT_WRITE);
-  free(buf);
+  aligned_free(buf);
 }
 
 TYPED_TEST(NeedleFinderTest, NoSegFault) {
@@ -1013,6 +1070,19 @@ TEST(NonConstTest, StringPiece) {
   }
 }
 
+// Similar to the begin() template functions, but instread of returing
+// an iterator, return a pointer to data.
+template <class Container>
+typename Container::value_type* dataPtr(Container& cont) {
+  // NOTE: &cont[0] is undefined if cont is empty (it creates a
+  // reference to nullptr - which is not dereferenced, but still UBSAN).
+  return cont.data();
+}
+template <class T, size_t N>
+constexpr T* dataPtr(T (&arr)[N]) noexcept {
+  return &arr[0];
+}
+
 template<class C>
 void testRangeFunc(C&& x, size_t n) {
   const auto& cx = x;
@@ -1021,8 +1091,8 @@ void testRangeFunc(C&& x, size_t n) {
   Range<const int*> r2 = range(std::forward<C>(x));
   Range<const int*> r3 = range(cx);
   Range<const int*> r5 = range(std::move(cx));
-  EXPECT_EQ(r1.begin(), &x[0]);
-  EXPECT_EQ(r1.end(), &x[n]);
+  EXPECT_EQ(r1.begin(), dataPtr(x));
+  EXPECT_EQ(r1.end(), dataPtr(x) + n);
   EXPECT_EQ(n, r1.size());
   EXPECT_EQ(n, r2.size());
   EXPECT_EQ(n, r3.size());
@@ -1045,6 +1115,62 @@ TEST(RangeFunc, Array) {
 TEST(RangeFunc, CArray) {
   int x[] {1, 2, 3, 4};
   testRangeFunc(x, 4);
+}
+
+TEST(RangeFunc, ConstexprCArray) {
+  static constexpr const int numArray[4] = {3, 17, 1, 9};
+  constexpr const auto numArrayRange = range(numArray);
+  EXPECT_EQ(17, numArrayRange[1]);
+  constexpr const auto numArrayRangeSize = numArrayRange.size();
+  EXPECT_EQ(4, numArrayRangeSize);
+}
+
+TEST(RangeFunc, ConstexprStdArray) {
+  static constexpr const std::array<int, 4> numArray = {{3, 17, 1, 9}};
+  constexpr const auto numArrayRange = range(numArray);
+  EXPECT_EQ(17, numArrayRange[1]);
+  constexpr const auto numArrayRangeSize = numArrayRange.size();
+  EXPECT_EQ(4, numArrayRangeSize);
+}
+
+TEST(RangeFunc, ConstexprStdArrayZero) {
+  static constexpr const std::array<int, 0> numArray = {};
+  constexpr const auto numArrayRange = range(numArray);
+  constexpr const auto numArrayRangeSize = numArrayRange.size();
+  EXPECT_EQ(0, numArrayRangeSize);
+}
+
+TEST(RangeFunc, ConstexprIteratorPair) {
+  static constexpr const int numArray[4] = {3, 17, 1, 9};
+  constexpr const auto numPtr = static_cast<const int*>(numArray);
+  constexpr const auto numIterRange = range(numPtr + 1, numPtr + 3);
+  EXPECT_EQ(1, numIterRange[1]);
+  constexpr const auto numIterRangeSize = numIterRange.size();
+  EXPECT_EQ(2, numIterRangeSize);
+}
+
+TEST(RangeFunc, ConstexprCollection) {
+  class IntCollection {
+   public:
+    constexpr IntCollection(const int* d, size_t s) : data_(d), size_(s) {}
+    constexpr const int* data() const {
+      return data_;
+    }
+    constexpr size_t size() const {
+      return size_;
+    }
+
+   private:
+    const int* data_;
+    size_t size_;
+  };
+  static constexpr const int numArray[4] = {3, 17, 1, 9};
+  constexpr const auto numPtr = static_cast<const int*>(numArray);
+  constexpr const auto numColl = IntCollection(numPtr + 1, 2);
+  constexpr const auto numCollRange = range(numColl);
+  EXPECT_EQ(1, numCollRange[1]);
+  constexpr const auto numCollRangeSize = numCollRange.size();
+  EXPECT_EQ(2, numCollRangeSize);
 }
 
 std::string get_rand_str(size_t size,
@@ -1166,4 +1292,62 @@ TEST(ReplaceAll, BadArg) {
   }
 
   EXPECT_EQ(count, 2);
+}
+
+TEST(Range, Constructors) {
+  vector<int> c = {1, 2, 3};
+  typedef Range<vector<int>::iterator> RangeType;
+  typedef Range<vector<int>::const_iterator> ConstRangeType;
+  RangeType cr(c.begin(), c.end());
+  auto subpiece1 = ConstRangeType(cr, 1, 5);
+  auto subpiece2 = ConstRangeType(cr, 1);
+  EXPECT_EQ(subpiece1.size(), 2);
+  EXPECT_EQ(subpiece1.begin(), subpiece2.begin());
+  EXPECT_EQ(subpiece1.end(), subpiece2.end());
+}
+
+TEST(Range, ArrayConstructors) {
+  auto charArray = std::array<char, 4>{{'t', 'e', 's', 't'}};
+  auto constCharArray = std::array<char, 6>{{'f', 'o', 'o', 'b', 'a', 'r'}};
+  auto emptyArray = std::array<char, 0>{};
+
+  auto sp1 = StringPiece{charArray};
+  EXPECT_EQ(4, sp1.size());
+  EXPECT_EQ(charArray.data(), sp1.data());
+
+  auto sp2 = StringPiece(constCharArray);
+  EXPECT_EQ(6, sp2.size());
+  EXPECT_EQ(constCharArray.data(), sp2.data());
+
+  auto msp = MutableStringPiece(charArray);
+  EXPECT_EQ(4, msp.size());
+  EXPECT_EQ(charArray.data(), msp.data());
+
+  auto esp = StringPiece(emptyArray);
+  EXPECT_EQ(0, esp.size());
+  EXPECT_EQ(nullptr, esp.data());
+
+  auto emsp = MutableStringPiece(emptyArray);
+  EXPECT_EQ(0, emsp.size());
+  EXPECT_EQ(nullptr, emsp.data());
+
+  static constexpr std::array<int, 4> numArray = {{3, 17, 1, 9}};
+  constexpr auto numRange = Range<const int*>{numArray};
+  EXPECT_EQ(17, numRange[1]);
+
+  static constexpr std::array<int, 0> emptyNumArray{};
+  constexpr auto emptyNumRange = Range<const int*>{emptyNumArray};
+  EXPECT_EQ(0, emptyNumRange.size());
+}
+
+TEST(Range, ConstexprAccessors) {
+  constexpr StringPiece piece = range("hello");
+  static_assert(piece.size() == 6u, "");
+  static_assert(piece.end() - piece.begin() == 6u, "");
+  static_assert(piece.data() == piece.begin(), "");
+  static_assert(piece.start() == piece.begin(), "");
+  static_assert(piece.cbegin() == piece.begin(), "");
+  static_assert(piece.cend() == piece.end(), "");
+  static_assert(*piece.begin() == 'h', "");
+  static_assert(*(piece.end() - 1) == '\0', "");
 }

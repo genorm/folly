@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 // ELF file parser
 
-#ifndef FOLLY_EXPERIMENTAL_SYMBOLIZER_ELF_H_
+#pragma once
 #define FOLLY_EXPERIMENTAL_SYMBOLIZER_ELF_H_
 
 #include <stdio.h>
@@ -58,8 +58,13 @@ class ElfFile {
     kSystemError = -1,
     kInvalidElfFile = -2,
   };
+  // Open the ELF file. Does not throw on error.
   int openNoThrow(const char* name, bool readOnly=true,
                   const char** msg=nullptr) noexcept;
+
+  // Like openNoThrow, but follow .gnu_debuglink if present
+  int openAndFollow(const char* name, bool readOnly=true,
+                    const char** msg=nullptr) noexcept;
 
   // Open the ELF file. Throws on error.
   void open(const char* name, bool readOnly=true);
@@ -193,7 +198,7 @@ class ElfFile {
 
  private:
   bool init(const char** msg);
-  void destroy();
+  void reset();
   ElfFile(const ElfFile&) = delete;
   ElfFile& operator=(const ElfFile&) = delete;
 
@@ -241,5 +246,3 @@ class ElfFile {
 }  // namespace folly
 
 #include <folly/experimental/symbolizer/Elf-inl.h>
-
-#endif /* FOLLY_EXPERIMENTAL_SYMBOLIZER_ELF_H_ */

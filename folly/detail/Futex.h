@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,9 @@
 #include <chrono>
 #include <limits>
 #include <assert.h>
-#include <unistd.h>
 #include <boost/noncopyable.hpp>
+
+#include <folly/portability/Unistd.h>
 
 namespace folly { namespace detail {
 
@@ -80,18 +81,36 @@ struct Futex : Atom<uint32_t>, boost::noncopyable {
         "futexWaitUntil only knows std::chrono::{system_clock,steady_clock}");
     assert((std::is_same<Clock, system_clock>::value) || Clock::is_steady);
 
-    auto duration = absTime.time_since_epoch();
+    // We launder the clock type via a std::chrono::duration so that we
+    // can compile both the true and false branch.  Tricky case is when
+    // steady_clock has a higher precision than system_clock (Xcode 6,
+    // for example), for which time_point<system_clock> construction
+    // refuses to do an implicit duration conversion.  (duration is
+    // happy to implicitly convert its denominator causing overflow, but
+    // refuses conversion that might cause truncation.)  We use explicit
+    // duration_cast to work around this.  Truncation does not actually
+    // occur (unless Duration != Clock::duration) because the missing
+    // implicit conversion is in the untaken branch.
+    Duration absTimeDuration = absTime.time_since_epoch();
     if (std::is_same<Clock, system_clock>::value) {
-      time_point<system_clock> absSystemTime(duration);
+      time_point<system_clock> absSystemTime(
+          duration_cast<system_clock::duration>(absTimeDuration));
       return futexWaitImpl(expected, &absSystemTime, nullptr, waitMask);
     } else {
-      time_point<steady_clock> absSteadyTime(duration);
+      time_point<steady_clock> absSteadyTime(
+          duration_cast<steady_clock::duration>(absTimeDuration));
       return futexWaitImpl(expected, nullptr, &absSteadyTime, waitMask);
     }
   }
 
-  /** Wakens up to count waiters where (waitMask & wakeMask) != 0,
-   *  returning the number of awoken threads. */
+  /** Wakens up to count waiters where (waitMask & wakeMask) !=
+   *  0, returning the number of awoken threads, or -1 if an error
+   *  occurred.  Note that when constructing a concurrency primitive
+   *  that can guard its own destruction, it is likely that you will
+   *  want to ignore EINVAL here (as well as making sure that you
+   *  never touch the object after performing the memory store that
+   *  is the linearization point for unlock or control handoff).
+   *  See https://sourceware.org/bugzilla/show_bug.cgi?id=13690 */
   int futexWake(int count = std::numeric_limits<int>::max(),
                 uint32_t wakeMask = -1);
 
@@ -118,7 +137,8 @@ struct EmulatedFutexAtomic : public std::atomic<T> {
   EmulatedFutexAtomic() noexcept = default;
   constexpr /* implicit */ EmulatedFutexAtomic(T init) noexcept
       : std::atomic<T>(init) {}
-  EmulatedFutexAtomic(const EmulatedFutexAtomic& rhs) = delete;
+  // It doesn't copy or move
+  EmulatedFutexAtomic(EmulatedFutexAtomic&& rhs) = delete;
 };
 
 /* Available specializations, with definitions elsewhere */

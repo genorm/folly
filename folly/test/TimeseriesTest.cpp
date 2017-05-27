@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,25 +14,59 @@
  * limitations under the License.
  */
 
-#include <folly/stats/BucketedTimeSeries.h>
+#include <folly/detail/Stats.h>
 #include <folly/stats/BucketedTimeSeries-defs.h>
-#include <folly/stats/MultiLevelTimeSeries.h>
+#include <folly/stats/BucketedTimeSeries.h>
 #include <folly/stats/MultiLevelTimeSeries-defs.h>
+#include <folly/stats/MultiLevelTimeSeries.h>
+
+#include <array>
 
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 
 #include <folly/Foreach.h>
+#include <folly/portability/GTest.h>
 
 using std::chrono::seconds;
 using std::string;
 using std::vector;
 using folly::BucketedTimeSeries;
 
+using Bucket = folly::detail::Bucket<int64_t>;
+using StatsClock = folly::LegacyStatsClock<std::chrono::seconds>;
+using TimePoint = StatsClock::time_point;
+using Duration = StatsClock::duration;
+
+/*
+ * Helper functions to allow us to directly log time points and duration
+ */
+namespace std {
+std::ostream& operator<<(std::ostream& os, std::chrono::seconds s) {
+  os << s.count();
+  return os;
+}
+std::ostream& operator<<(std::ostream& os, TimePoint tp) {
+  os << tp.time_since_epoch().count();
+  return os;
+}
+}
+
+namespace {
+TimePoint mkTimePoint(int value) {
+  return TimePoint(StatsClock::duration(value));
+}
+
 struct TestData {
-  size_t duration;
+  TestData(int d, int b, std::initializer_list<int> starts)
+      : duration(d), numBuckets(b) {
+    bucketStarts.reserve(starts.size());
+    for (int s : starts) {
+      bucketStarts.push_back(mkTimePoint(s));
+    }
+  }
+  seconds duration;
   size_t numBuckets;
-  vector<ssize_t> bucketStarts;
+  vector<TimePoint> bucketStarts;
 };
 vector<TestData> testData = {
   // 71 seconds x 4 buckets
@@ -46,54 +80,56 @@ vector<TestData> testData = {
   // 1 second x 1 buckets
   { 1, 1, {0}},
 };
+}
 
 TEST(BucketedTimeSeries, getBucketInfo) {
   for (const auto& data : testData) {
-    BucketedTimeSeries<int64_t> ts(data.numBuckets, seconds(data.duration));
+    BucketedTimeSeries<int64_t> ts(data.numBuckets, data.duration);
 
     for (uint32_t n = 0; n < 10000; n += 1234) {
       seconds offset(n * data.duration);
 
       for (uint32_t idx = 0; idx < data.numBuckets; ++idx) {
-        seconds bucketStart(data.bucketStarts[idx]);
-        seconds nextBucketStart;
+        auto bucketStart = data.bucketStarts[idx];
+        TimePoint nextBucketStart;
         if (idx + 1 < data.numBuckets) {
-            nextBucketStart = seconds(data.bucketStarts[idx + 1]);
+          nextBucketStart = data.bucketStarts[idx + 1];
         } else {
-            nextBucketStart = seconds(data.duration);
+          nextBucketStart = TimePoint(data.duration);
         }
 
-        seconds expectedStart = offset + bucketStart;
-        seconds expectedNextStart = offset + nextBucketStart;
-        seconds midpoint = (expectedStart + expectedNextStart) / 2;
+        TimePoint expectedStart = offset + bucketStart;
+        TimePoint expectedNextStart = offset + nextBucketStart;
+        TimePoint midpoint =
+            expectedStart + (expectedNextStart - expectedStart) / 2;
 
-        vector<std::pair<string, seconds>> timePoints = {
-          {"expectedStart", expectedStart},
-          {"midpoint", midpoint},
-          {"expectedEnd", expectedNextStart - seconds(1)},
+        vector<std::pair<string, TimePoint>> timePoints = {
+            {"expectedStart", expectedStart},
+            {"midpoint", midpoint},
+            {"expectedEnd", expectedNextStart - seconds(1)},
         };
 
         for (const auto& point : timePoints) {
           // Check that getBucketIdx() returns the expected index
-          EXPECT_EQ(idx, ts.getBucketIdx(point.second)) <<
-            data.duration << "x" << data.numBuckets << ": " <<
-            point.first << "=" << point.second.count();
+          EXPECT_EQ(idx, ts.getBucketIdx(point.second))
+              << data.duration << "x" << data.numBuckets << ": " << point.first
+              << "=" << point.second;
 
           // Check the data returned by getBucketInfo()
           size_t returnedIdx;
-          seconds returnedStart;
-          seconds returnedNextStart;
+          TimePoint returnedStart;
+          TimePoint returnedNextStart;
           ts.getBucketInfo(expectedStart, &returnedIdx,
                            &returnedStart, &returnedNextStart);
-          EXPECT_EQ(idx, returnedIdx) <<
-            data.duration << "x" << data.numBuckets << ": " <<
-            point.first << "=" << point.second.count();
-          EXPECT_EQ(expectedStart.count(), returnedStart.count()) <<
-            data.duration << "x" << data.numBuckets << ": " <<
-            point.first << "=" << point.second.count();
-          EXPECT_EQ(expectedNextStart.count(), returnedNextStart.count()) <<
-            data.duration << "x" << data.numBuckets << ": " <<
-            point.first << "=" << point.second.count();
+          EXPECT_EQ(idx, returnedIdx) << data.duration << "x" << data.numBuckets
+                                      << ": " << point.first << "="
+                                      << point.second;
+          EXPECT_EQ(expectedStart, returnedStart)
+              << data.duration << "x" << data.numBuckets << ": " << point.first
+              << "=" << point.second;
+          EXPECT_EQ(expectedNextStart, returnedNextStart)
+              << data.duration << "x" << data.numBuckets << ": " << point.first
+              << "=" << point.second;
         }
       }
     }
@@ -465,20 +501,22 @@ TEST(BucketedTimeSeries, avgTypeConversion) {
 TEST(BucketedTimeSeries, forEachBucket) {
   typedef BucketedTimeSeries<int64_t>::Bucket Bucket;
   struct BucketInfo {
-    BucketInfo(const Bucket* b, seconds s, seconds ns)
-      : bucket(b), start(s), nextStart(ns) {}
+    BucketInfo(const Bucket* b, TimePoint s, TimePoint ns)
+        : bucket(b), start(s), nextStart(ns) {}
 
     const Bucket* bucket;
-    seconds start;
-    seconds nextStart;
+    TimePoint start;
+    TimePoint nextStart;
   };
 
   for (const auto& data : testData) {
     BucketedTimeSeries<int64_t> ts(data.numBuckets, seconds(data.duration));
 
     vector<BucketInfo> info;
-    auto fn = [&](const Bucket& bucket, seconds bucketStart,
-                  seconds bucketEnd) -> bool {
+    auto fn = [&](
+        const Bucket& bucket,
+        TimePoint bucketStart,
+        TimePoint bucketEnd) -> bool {
       info.emplace_back(&bucket, bucketStart, bucketEnd);
       return true;
     };
@@ -492,28 +530,28 @@ TEST(BucketedTimeSeries, forEachBucket) {
     // Check the data passed in to the function
     size_t infoIdx = 0;
     size_t bucketIdx = 1;
-    ssize_t offset = -data.duration;
+    seconds offset = -data.duration;
     for (size_t n = 0; n < data.numBuckets; ++n) {
       if (bucketIdx >= data.numBuckets) {
         bucketIdx = 0;
         offset += data.duration;
       }
 
-      EXPECT_EQ(data.bucketStarts[bucketIdx] + offset,
-                info[infoIdx].start.count()) <<
-        data.duration << "x" << data.numBuckets << ": bucketIdx=" <<
-        bucketIdx << ", infoIdx=" << infoIdx;
+      EXPECT_EQ(data.bucketStarts[bucketIdx] + offset, info[infoIdx].start)
+          << data.duration << "x" << data.numBuckets
+          << ": bucketIdx=" << bucketIdx << ", infoIdx=" << infoIdx;
 
       size_t nextBucketIdx = bucketIdx + 1;
-      ssize_t nextOffset = offset;
+      seconds nextOffset = offset;
       if (nextBucketIdx >= data.numBuckets) {
         nextBucketIdx = 0;
         nextOffset += data.duration;
       }
-      EXPECT_EQ(data.bucketStarts[nextBucketIdx] + nextOffset,
-                info[infoIdx].nextStart.count()) <<
-        data.duration << "x" << data.numBuckets << ": bucketIdx=" <<
-        bucketIdx << ", infoIdx=" << infoIdx;
+      EXPECT_EQ(
+          data.bucketStarts[nextBucketIdx] + nextOffset,
+          info[infoIdx].nextStart)
+          << data.duration << "x" << data.numBuckets
+          << ": bucketIdx=" << bucketIdx << ", infoIdx=" << infoIdx;
 
       EXPECT_EQ(&ts.getBucketByIndex(bucketIdx), info[infoIdx].bucket);
 
@@ -533,7 +571,7 @@ TEST(BucketedTimeSeries, queryByIntervalSimple) {
   // This is entirely in the first bucket, which has a sum of 4.
   // The code knows only part of the bucket is covered, and correctly
   // estimates the desired sum as 3.
-  EXPECT_EQ(2, a.sum(seconds(0), seconds(2)));
+  EXPECT_EQ(2, a.sum(mkTimePoint(0), mkTimePoint(2)));
 }
 
 TEST(BucketedTimeSeries, queryByInterval) {
@@ -544,7 +582,7 @@ TEST(BucketedTimeSeries, queryByInterval) {
 
   for (unsigned int i = 0; i < kDuration; ++i) {
     // add value 'i' at time 'i'
-    b.addValue(seconds(i), i);
+    b.addValue(mkTimePoint(i), i);
   }
 
   // Current bucket state:
@@ -570,39 +608,39 @@ TEST(BucketedTimeSeries, queryByInterval) {
     {0, -1, -1, -1, -1, -1, -1}
   };
 
-  seconds currentTime = b.getLatestTime() + seconds(1);
+  TimePoint currentTime = b.getLatestTime() + seconds(1);
   for (int i = 0; i <= kDuration + 1; i++) {
     for (int j = 0; j <= kDuration - i; j++) {
-      seconds start = currentTime - seconds(i + j);
-      seconds end = currentTime - seconds(i);
+      TimePoint start = currentTime - seconds(i + j);
+      TimePoint end = currentTime - seconds(i);
       double expectedSum = expectedSums1[i][j];
-      EXPECT_EQ(expectedSum, b.sum(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedSum, b.sum(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
       uint64_t expectedCount = expectedCounts1[i][j];
-      EXPECT_EQ(expectedCount, b.count(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedCount, b.count(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
       double expectedAvg = expectedCount ? expectedSum / expectedCount : 0;
-      EXPECT_EQ(expectedAvg, b.avg(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedAvg, b.avg(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
       double expectedRate = j ? expectedSum / j : 0;
-      EXPECT_EQ(expectedRate, b.rate(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedRate, b.rate(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
     }
   }
 
   // Add 3 more values.
   // This will overwrite 1 full bucket, and put us halfway through the next.
   for (unsigned int i = kDuration; i < kDuration + 3; ++i) {
-    b.addValue(seconds(i), i);
+    b.addValue(mkTimePoint(i), i);
   }
-  EXPECT_EQ(seconds(4), b.getEarliestTime());
+  EXPECT_EQ(mkTimePoint(4), b.getEarliestTime());
 
   // Current bucket state:
   // 0: time=[6,  8): values=(6, 7), sum=13, count=2
@@ -630,35 +668,35 @@ TEST(BucketedTimeSeries, queryByInterval) {
   currentTime = b.getLatestTime() + seconds(1);
   for (int i = 0; i <= kDuration + 1; i++) {
     for (int j = 0; j <= kDuration - i; j++) {
-      seconds start = currentTime - seconds(i + j);
-      seconds end = currentTime - seconds(i);
+      TimePoint start = currentTime - seconds(i + j);
+      TimePoint end = currentTime - seconds(i);
       double expectedSum = expectedSums2[i][j];
-      EXPECT_EQ(expectedSum, b.sum(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedSum, b.sum(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
       uint64_t expectedCount = expectedCounts2[i][j];
-      EXPECT_EQ(expectedCount, b.count(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedCount, b.count(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
       double expectedAvg = expectedCount ? expectedSum / expectedCount : 0;
-      EXPECT_EQ(expectedAvg, b.avg(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedAvg, b.avg(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
-      seconds dataStart = std::max(start, b.getEarliestTime());
-      seconds dataEnd = std::max(end, dataStart);
+      TimePoint dataStart = std::max(start, b.getEarliestTime());
+      TimePoint dataEnd = std::max(end, dataStart);
       seconds expectedInterval = dataEnd - dataStart;
-      EXPECT_EQ(expectedInterval, b.elapsed(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedInterval, b.elapsed(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
 
       double expectedRate = expectedInterval.count() ?
         expectedSum / expectedInterval.count() : 0;
-      EXPECT_EQ(expectedRate, b.rate(start, end)) <<
-        "i=" << i << ", j=" << j <<
-        ", interval=[" << start.count() << ", " << end.count() << ")";
+      EXPECT_EQ(expectedRate, b.rate(start, end))
+          << "i=" << i << ", j=" << j << ", interval=[" << start << ", " << end
+          << ")";
     }
   }
 }
@@ -671,10 +709,10 @@ TEST(BucketedTimeSeries, rateByInterval) {
   // Add data points at a constant rate of 10 per second.
   // Start adding data points at kDuration, and fill half of the buckets for
   // now.
-  seconds start = kDuration;
-  seconds end = kDuration + (kDuration / 2);
+  TimePoint start(kDuration);
+  TimePoint end(kDuration + (kDuration / 2));
   const double kFixedRate = 10.0;
-  for (seconds i = start; i < end; ++i) {
+  for (TimePoint i = start; i < end; i += seconds(1)) {
     b.addValue(i, kFixedRate);
   }
 
@@ -694,24 +732,24 @@ TEST(BucketedTimeSeries, rateByInterval) {
 
   // We haven't added anything before time kDuration.
   // Querying data earlier than this should result in a rate of 0.
-  EXPECT_EQ(0.0, b.rate(seconds(0), seconds(1)));
-  EXPECT_EQ(0.0, b.countRate(seconds(0), seconds(1)));
+  EXPECT_EQ(0.0, b.rate(mkTimePoint(0), mkTimePoint(1)));
+  EXPECT_EQ(0.0, b.countRate(mkTimePoint(0), mkTimePoint(1)));
 
   // Fill the remainder of the timeseries from kDuration to kDuration*2
   start = end;
-  end = kDuration * 2;
-  for (seconds i = start; i < end; ++i) {
+  end = TimePoint(kDuration * 2);
+  for (TimePoint i = start; i < end; i += seconds(1)) {
     b.addValue(i, kFixedRate);
   }
 
   EXPECT_EQ(kFixedRate, b.rate());
-  EXPECT_EQ(kFixedRate, b.rate(kDuration, kDuration * 2));
-  EXPECT_EQ(kFixedRate, b.rate(seconds(0), kDuration * 2));
-  EXPECT_EQ(kFixedRate, b.rate(seconds(0), kDuration * 10));
+  EXPECT_EQ(kFixedRate, b.rate(TimePoint(kDuration), TimePoint(kDuration * 2)));
+  EXPECT_EQ(kFixedRate, b.rate(TimePoint(), TimePoint(kDuration * 2)));
+  EXPECT_EQ(kFixedRate, b.rate(TimePoint(), TimePoint(kDuration * 10)));
   EXPECT_EQ(1.0, b.countRate());
-  EXPECT_EQ(1.0, b.countRate(kDuration, kDuration * 2));
-  EXPECT_EQ(1.0, b.countRate(seconds(0), kDuration * 2));
-  EXPECT_EQ(1.0, b.countRate(seconds(0), kDuration * 10));
+  EXPECT_EQ(1.0, b.countRate(TimePoint(kDuration), TimePoint(kDuration * 2)));
+  EXPECT_EQ(1.0, b.countRate(TimePoint(), TimePoint(kDuration * 2)));
+  EXPECT_EQ(1.0, b.countRate(TimePoint(), TimePoint(kDuration * 10)));
 }
 
 TEST(BucketedTimeSeries, addHistorical) {
@@ -720,7 +758,7 @@ TEST(BucketedTimeSeries, addHistorical) {
   BucketedTimeSeries<double> b(kNumBuckets, kDuration);
 
   // Initially fill with a constant rate of data
-  for (seconds i = seconds(0); i < seconds(10); ++i) {
+  for (TimePoint i = mkTimePoint(0); i < mkTimePoint(10); i += seconds(1)) {
     b.addValue(i, 10.0);
   }
 
@@ -729,15 +767,15 @@ TEST(BucketedTimeSeries, addHistorical) {
   EXPECT_EQ(10, b.count());
 
   // Add some more data points to the middle bucket
-  b.addValue(seconds(4), 40.0);
-  b.addValue(seconds(5), 40.0);
+  b.addValue(mkTimePoint(4), 40.0);
+  b.addValue(mkTimePoint(5), 40.0);
   EXPECT_EQ(15.0, b.avg());
   EXPECT_EQ(18.0, b.rate());
   EXPECT_EQ(12, b.count());
 
   // Now start adding more current data points, until we are about to roll over
   // the bucket where we added the extra historical data.
-  for (seconds i = seconds(10); i < seconds(14); ++i) {
+  for (TimePoint i = mkTimePoint(10); i < mkTimePoint(14); i += seconds(1)) {
     b.addValue(i, 10.0);
   }
   EXPECT_EQ(15.0, b.avg());
@@ -745,19 +783,110 @@ TEST(BucketedTimeSeries, addHistorical) {
   EXPECT_EQ(12, b.count());
 
   // Now roll over the middle bucket
-  b.addValue(seconds(14), 10.0);
-  b.addValue(seconds(15), 10.0);
+  b.addValue(mkTimePoint(14), 10.0);
+  b.addValue(mkTimePoint(15), 10.0);
   EXPECT_EQ(10.0, b.avg());
   EXPECT_EQ(10.0, b.rate());
   EXPECT_EQ(10, b.count());
 
   // Add more historical values past the bucket window.
   // These should be ignored.
-  EXPECT_FALSE(b.addValue(seconds(4), 40.0));
-  EXPECT_FALSE(b.addValue(seconds(5), 40.0));
+  EXPECT_FALSE(b.addValue(mkTimePoint(4), 40.0));
+  EXPECT_FALSE(b.addValue(mkTimePoint(5), 40.0));
   EXPECT_EQ(10.0, b.avg());
   EXPECT_EQ(10.0, b.rate());
   EXPECT_EQ(10, b.count());
+}
+
+TEST(BucketedTimeSeries, reConstructEmptyTimeSeries) {
+  auto verify = [](auto timeSeries) {
+    EXPECT_TRUE(timeSeries.empty());
+    EXPECT_EQ(0, timeSeries.sum());
+    EXPECT_EQ(0, timeSeries.count());
+  };
+
+  // Create a 100 second timeseries with 10 buckets_
+  BucketedTimeSeries<int64_t> ts(10, seconds(100));
+
+  verify(ts);
+
+  auto firstTime = ts.firstTime();
+  auto latestTime = ts.latestTime();
+  auto duration = ts.duration();
+  auto buckets = ts.buckets();
+
+  // Reconstruct the timeseries
+  BucketedTimeSeries<int64_t> newTs(firstTime, latestTime, duration, buckets);
+
+  verify(newTs);
+}
+
+TEST(BucketedTimeSeries, reConstructWithValidData) {
+  // Create a 100 second timeseries with 10 buckets_
+  BucketedTimeSeries<int64_t> ts(10, seconds(100));
+
+  auto setup = [&] {
+    ts.clear();
+    // Add 1 value to each bucket
+    for (int n = 5; n <= 95; n += 10) {
+      ts.addValue(seconds(n), 6);
+    }
+
+    EXPECT_EQ(10, ts.count());
+    EXPECT_EQ(60, ts.sum());
+    EXPECT_EQ(6, ts.avg());
+  };
+
+  setup();
+
+  auto firstTime = ts.firstTime();
+  auto latestTime = ts.latestTime();
+  auto duration = ts.duration();
+  auto buckets = ts.buckets();
+
+  // Reconstruct the timeseries
+  BucketedTimeSeries<int64_t> newTs(firstTime, latestTime, duration, buckets);
+
+  auto compare = [&] {
+    EXPECT_EQ(ts.firstTime(), newTs.firstTime());
+    EXPECT_EQ(ts.latestTime(), newTs.latestTime());
+    EXPECT_EQ(ts.duration(), newTs.duration());
+    EXPECT_EQ(ts.buckets().size(), newTs.buckets().size());
+    EXPECT_EQ(ts.sum(), newTs.sum());
+    EXPECT_EQ(ts.count(), newTs.count());
+
+    for (auto it1 = ts.buckets().begin(), it2 = newTs.buckets().begin();
+         it1 != ts.buckets().end();
+         it1++, it2++) {
+      EXPECT_EQ(it1->sum, it2->sum);
+      EXPECT_EQ(it1->count, it2->count);
+    }
+  };
+
+  compare();
+}
+
+TEST(BucketedTimeSeries, reConstructWithCorruptedData) {
+  // The total should have been 0 as firstTime > latestTime
+  EXPECT_THROW(
+      {
+        std::vector<Bucket> buckets(10);
+        buckets[0].sum = 1;
+        buckets[0].count = 1;
+
+        BucketedTimeSeries<int64_t> ts(
+            mkTimePoint(1), mkTimePoint(0), Duration(10), buckets);
+      },
+      std::invalid_argument);
+
+  // The duration should be no less than latestTime - firstTime
+  EXPECT_THROW(
+      BucketedTimeSeries<int64_t>(
+          mkTimePoint(1),
+          mkTimePoint(100),
+          Duration(10),
+          std::vector<Bucket>(10)),
+      std::invalid_argument);
 }
 
 namespace IntMHTS {
@@ -859,10 +988,12 @@ TEST(MinuteHourTimeSeries, Basic) {
   EXPECT_EQ(mhts.avg(IntMHTS::MINUTE), 100);
   EXPECT_EQ(mhts.avg(IntMHTS::HOUR), 100);
   EXPECT_EQ(mhts.avg(IntMHTS::ALLTIME), 32.5);
+  EXPECT_EQ(mhts.avg<int>(IntMHTS::ALLTIME), 32);
 
   EXPECT_EQ(mhts.rate(IntMHTS::MINUTE), 100);
   EXPECT_EQ(mhts.rate(IntMHTS::HOUR), 100);
-  EXPECT_EQ(mhts.rate(IntMHTS::ALLTIME), 32);
+  EXPECT_EQ(mhts.rate(IntMHTS::ALLTIME), 32.5);
+  EXPECT_EQ(mhts.rate<int>(IntMHTS::ALLTIME), 32);
 
   for (int i = 0; i < 1800; ++i) {
     mhts.addValue(cur_time++, 120);
@@ -894,22 +1025,24 @@ TEST(MinuteHourTimeSeries, QueryByInterval) {
   folly::MultiLevelTimeSeries<int> mhts(60, IntMHTS::NUM_LEVELS,
                                         IntMHTS::kMinuteHourDurations);
 
-  seconds curTime(0);
-  for (curTime = seconds(0); curTime < seconds(7200); curTime++) {
+  TimePoint curTime;
+  for (curTime = mkTimePoint(0); curTime < mkTimePoint(7200);
+       curTime += seconds(1)) {
     mhts.addValue(curTime, 1);
   }
-  for (curTime = seconds(7200); curTime < seconds(7200 + 3540); curTime++) {
+  for (curTime = mkTimePoint(7200); curTime < mkTimePoint(7200 + 3540);
+       curTime += seconds(1)) {
     mhts.addValue(curTime, 10);
   }
-  for (curTime = seconds(7200 + 3540); curTime < seconds(7200 + 3600);
-       curTime++) {
+  for (curTime = mkTimePoint(7200 + 3540); curTime < mkTimePoint(7200 + 3600);
+       curTime += seconds(1)) {
     mhts.addValue(curTime, 100);
   }
   mhts.flush();
 
   struct TimeInterval {
-    seconds start;
-    seconds end;
+    TimePoint start;
+    TimePoint end;
   };
   TimeInterval intervals[12] = {
     { curTime - seconds(60), curTime },
@@ -952,6 +1085,196 @@ TEST(MinuteHourTimeSeries, QueryByInterval) {
     int r = mhts.rate<int>(interval.start, interval.end);
     int expectedRate =
       expectedSums[i] / (interval.end - interval.start).count();
+    EXPECT_EQ(expectedRate, r);
+  }
+}
+
+TEST(MultiLevelTimeSeries, Basic) {
+  // using constructor with initializer_list parameter
+  folly::MultiLevelTimeSeries<int> mhts(
+      60, {seconds(60), seconds(3600), seconds(0)});
+  EXPECT_EQ(mhts.numLevels(), 3);
+
+  EXPECT_EQ(mhts.sum(seconds(60)), 0);
+  EXPECT_EQ(mhts.sum(seconds(3600)), 0);
+  EXPECT_EQ(mhts.sum(seconds(0)), 0);
+
+  EXPECT_EQ(mhts.avg(seconds(60)), 0);
+  EXPECT_EQ(mhts.avg(seconds(3600)), 0);
+  EXPECT_EQ(mhts.avg(seconds(0)), 0);
+
+  EXPECT_EQ(mhts.rate(seconds(60)), 0);
+  EXPECT_EQ(mhts.rate(seconds(3600)), 0);
+  EXPECT_EQ(mhts.rate(seconds(0)), 0);
+
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(60)).elapsed().count(), 0);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(3600)).elapsed().count(), 0);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(0)).elapsed().count(), 0);
+
+  seconds cur_time(0);
+
+  mhts.addValue(cur_time++, 10);
+  mhts.flush();
+
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(60)).elapsed().count(), 1);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(3600)).elapsed().count(), 1);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(0)).elapsed().count(), 1);
+
+  for (int i = 0; i < 299; ++i) {
+    mhts.addValue(cur_time++, 10);
+  }
+  mhts.flush();
+
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(60)).elapsed().count(), 60);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(3600)).elapsed().count(), 300);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(0)).elapsed().count(), 300);
+
+  EXPECT_EQ(mhts.sum(seconds(60)), 600);
+  EXPECT_EQ(mhts.sum(seconds(3600)), 300 * 10);
+  EXPECT_EQ(mhts.sum(seconds(0)), 300 * 10);
+
+  EXPECT_EQ(mhts.avg(seconds(60)), 10);
+  EXPECT_EQ(mhts.avg(seconds(3600)), 10);
+  EXPECT_EQ(mhts.avg(seconds(0)), 10);
+
+  EXPECT_EQ(mhts.rate(seconds(60)), 10);
+  EXPECT_EQ(mhts.rate(seconds(3600)), 10);
+  EXPECT_EQ(mhts.rate(seconds(0)), 10);
+
+  for (int i = 0; i < 3600 * 3 - 300; ++i) {
+    mhts.addValue(cur_time++, 10);
+  }
+  mhts.flush();
+
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(60)).elapsed().count(), 60);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(3600)).elapsed().count(), 3600);
+  EXPECT_EQ(mhts.getLevelByDuration(seconds(0)).elapsed().count(), 3600 * 3);
+
+  EXPECT_EQ(mhts.sum(seconds(60)), 600);
+  EXPECT_EQ(mhts.sum(seconds(3600)), 3600 * 10);
+  EXPECT_EQ(mhts.sum(seconds(0)), 3600 * 3 * 10);
+
+  EXPECT_EQ(mhts.avg(seconds(60)), 10);
+  EXPECT_EQ(mhts.avg(seconds(3600)), 10);
+  EXPECT_EQ(mhts.avg(seconds(0)), 10);
+
+  EXPECT_EQ(mhts.rate(seconds(60)), 10);
+  EXPECT_EQ(mhts.rate(seconds(3600)), 10);
+  EXPECT_EQ(mhts.rate(seconds(0)), 10);
+
+  for (int i = 0; i < 3600; ++i) {
+    mhts.addValue(cur_time++, 100);
+  }
+  mhts.flush();
+
+  EXPECT_EQ(mhts.sum(seconds(60)), 60 * 100);
+  EXPECT_EQ(mhts.sum(seconds(3600)), 3600 * 100);
+  EXPECT_EQ(mhts.sum(seconds(0)), 3600 * 3 * 10 + 3600 * 100);
+
+  EXPECT_EQ(mhts.avg(seconds(60)), 100);
+  EXPECT_EQ(mhts.avg(seconds(3600)), 100);
+  EXPECT_EQ(mhts.avg(seconds(0)), 32.5);
+  EXPECT_EQ(mhts.avg<int>(seconds(0)), 32);
+
+  EXPECT_EQ(mhts.rate(seconds(60)), 100);
+  EXPECT_EQ(mhts.rate(seconds(3600)), 100);
+  EXPECT_EQ(mhts.rate(seconds(0)), 32.5);
+  EXPECT_EQ(mhts.rate<int>(seconds(0)), 32);
+
+  for (int i = 0; i < 1800; ++i) {
+    mhts.addValue(cur_time++, 120);
+  }
+  mhts.flush();
+
+  EXPECT_EQ(mhts.sum(seconds(60)), 60 * 120);
+  EXPECT_EQ(mhts.sum(seconds(3600)), 1800 * 100 + 1800 * 120);
+  EXPECT_EQ(mhts.sum(seconds(0)), 3600 * 3 * 10 + 3600 * 100 + 1800 * 120);
+
+  for (int i = 0; i < 60; ++i) {
+    mhts.addValue(cur_time++, 1000);
+  }
+  mhts.flush();
+
+  EXPECT_EQ(mhts.sum(seconds(60)), 60 * 1000);
+  EXPECT_EQ(mhts.sum(seconds(3600)), 1740 * 100 + 1800 * 120 + 60 * 1000);
+  EXPECT_EQ(
+      mhts.sum(seconds(0)),
+      3600 * 3 * 10 + 3600 * 100 + 1800 * 120 + 60 * 1000);
+
+  mhts.clear();
+  EXPECT_EQ(mhts.sum(seconds(0)), 0);
+}
+
+TEST(MultiLevelTimeSeries, QueryByInterval) {
+  folly::MultiLevelTimeSeries<int> mhts(
+      60, {seconds(60), seconds(3600), seconds(0)});
+
+  TimePoint curTime;
+  for (curTime = mkTimePoint(0); curTime < mkTimePoint(7200);
+       curTime += seconds(1)) {
+    mhts.addValue(curTime, 1);
+  }
+  for (curTime = mkTimePoint(7200); curTime < mkTimePoint(7200 + 3540);
+       curTime += seconds(1)) {
+    mhts.addValue(curTime, 10);
+  }
+  for (curTime = mkTimePoint(7200 + 3540); curTime < mkTimePoint(7200 + 3600);
+       curTime += seconds(1)) {
+    mhts.addValue(curTime, 100);
+  }
+  mhts.flush();
+
+  struct TimeInterval {
+    TimePoint start;
+    TimePoint end;
+  };
+
+  std::array<TimeInterval, 12> intervals = {{
+      {curTime - seconds(60), curTime},
+      {curTime - seconds(3600), curTime},
+      {curTime - seconds(7200), curTime},
+      {curTime - seconds(3600), curTime - seconds(60)},
+      {curTime - seconds(7200), curTime - seconds(60)},
+      {curTime - seconds(7200), curTime - seconds(3600)},
+      {curTime - seconds(50), curTime - seconds(20)},
+      {curTime - seconds(3020), curTime - seconds(20)},
+      {curTime - seconds(7200), curTime - seconds(20)},
+      {curTime - seconds(3000), curTime - seconds(1000)},
+      {curTime - seconds(7200), curTime - seconds(1000)},
+      {curTime - seconds(7200), curTime - seconds(3600)},
+  }};
+
+  std::array<int, 12> expectedSums = {{6000,
+                                       41400,
+                                       32400,
+                                       35400,
+                                       32130,
+                                       16200,
+                                       3000,
+                                       33600,
+                                       32310,
+                                       20000,
+                                       27900,
+                                       16200}};
+
+  std::array<int, 12> expectedCounts = {
+      {60, 3600, 7200, 3540, 7140, 3600, 30, 3000, 7180, 2000, 6200, 3600}};
+
+  for (size_t i = 0; i < intervals.size(); ++i) {
+    TimeInterval interval = intervals[i];
+
+    int s = mhts.sum(interval.start, interval.end);
+    EXPECT_EQ(expectedSums[i], s);
+
+    int c = mhts.count(interval.start, interval.end);
+    EXPECT_EQ(expectedCounts[i], c);
+
+    int a = mhts.avg<int>(interval.start, interval.end);
+    EXPECT_EQ(expectedCounts[i] ? (expectedSums[i] / expectedCounts[i]) : 0, a);
+
+    int r = mhts.rate<int>(interval.start, interval.end);
+    int expectedRate =
+        expectedSums[i] / (interval.end - interval.start).count();
     EXPECT_EQ(expectedRate, r);
   }
 }

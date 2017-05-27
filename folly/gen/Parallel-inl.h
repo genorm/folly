@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ class ClosableMPMCQueue {
   void openConsumer() { ++consumers_; }
 
   void closeInputProducer() {
-    int64_t producers = producers_--;
+    size_t producers = producers_--;
     CHECK(producers);
     if (producers == 1) { // last producer
       wakeConsumer_.notifyAll();
@@ -57,7 +57,7 @@ class ClosableMPMCQueue {
   }
 
   void closeOutputConsumer() {
-    int64_t consumers = consumers_--;
+    size_t consumers = consumers_--;
     CHECK(consumers);
     if (consumers == 1) { // last consumer
       wakeProducer_.notifyAll();
@@ -136,7 +136,7 @@ class Sub : public Operator<Sub<Sink>> {
             class Source,
             class Result =
                 decltype(std::declval<Sink>().compose(std::declval<Source>())),
-            class Just = Just<typename std::decay<Result>::type>>
+            class Just = SingleCopy<typename std::decay<Result>::type>>
   Just compose(const GenImpl<Value, Source>& source) const {
     return Just(source | sink_);
   }
@@ -228,7 +228,7 @@ class Parallel : public Operator<Parallel<Ops>> {
 
       void work() {
         puller_ | *ops_ | pusher_;
-      };
+      }
 
      public:
       Executor(size_t threads, const Ops* ops)
@@ -239,7 +239,7 @@ class Parallel : public Operator<Parallel<Ops>> {
             ops_(ops) {
         inQueue_.openProducer();
         outQueue_.openConsumer();
-        for (int t = 0; t < threads; ++t) {
+        for (size_t t = 0; t < threads; ++t) {
           inQueue_.openConsumer();
           outQueue_.openProducer();
           workers_.emplace_back([this] {
@@ -292,8 +292,10 @@ class Parallel : public Operator<Parallel<Ops>> {
     Generator(Source source, Ops ops, size_t threads)
         : source_(std::move(source)),
           ops_(std::move(ops)),
-          threads_(threads
-                       ?: std::max<size_t>(1, sysconf(_SC_NPROCESSORS_CONF))) {}
+          threads_(
+              threads
+                  ? threads
+                  : size_t(std::max<long>(1, sysconf(_SC_NPROCESSORS_CONF)))) {}
 
     template <class Handler>
     bool apply(Handler&& handler) const {
@@ -385,7 +387,7 @@ class ChunkedRangeSource
   Range<Iterator> range_;
 
  public:
-  ChunkedRangeSource() {}
+  ChunkedRangeSource() = default;
   ChunkedRangeSource(int chunkSize, Range<Iterator> range)
       : chunkSize_(chunkSize), range_(std::move(range)) {}
 
